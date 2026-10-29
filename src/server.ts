@@ -44,6 +44,7 @@ export async function buildServer(
     logger: loggerOpts as FastifyBaseLogger | false,
     exposeHeadRoutes: false,
     bodyLimit: config.maxBlobBytes,
+    ...(config.trustProxy ? { trustProxy: config.trustProxy } : {}),
   });
 
   // Open SQLite, run migrations before registering routes so the schema is

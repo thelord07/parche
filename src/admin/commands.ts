@@ -1,3 +1,5 @@
+import { mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { roleSchema } from '@chamba/core';
 import { and, eq, isNull } from 'drizzle-orm';
 import {
@@ -7,7 +9,7 @@ import {
   hashToken,
   parseExpiry,
 } from '../auth/tokens.js';
-import type { AppDb } from '../db/client.js';
+import type { AppDb, RawDb } from '../db/client.js';
 import { devices, groups, invites, members, users } from '../db/schema.js';
 import { newId } from '../ids.js';
 
@@ -293,4 +295,24 @@ export function createDevice(db: AppDb, options: CreateDeviceOptions): CreateDev
     .run();
 
   return { deviceId, deviceToken };
+}
+
+// ---------------------------------------------------------------------------
+// backup-db
+// ---------------------------------------------------------------------------
+
+/**
+ * Create an online backup of the SQLite database using better-sqlite3's
+ * `db.backup(dest)` API (SQLite Online Backup API). The backup is a
+ * complete, autonomous database file — no WAL or SHM files needed.
+ *
+ * @param rawDb - The raw better-sqlite3 Database instance (not the drizzle wrapper).
+ * @param dest  - Absolute or relative path for the output backup file. Its parent
+ *                directory is created if missing, by the process that runs the
+ *                backup — inside Docker that is the container user, which owns /data,
+ *                so `deploy/backup.sh` never has to create anything under ./data.
+ */
+export async function backupDb(rawDb: RawDb, dest: string): Promise<void> {
+  await mkdir(dirname(dest), { recursive: true });
+  await rawDb.backup(dest);
 }

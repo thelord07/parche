@@ -59,6 +59,53 @@ describe('loadConfig', () => {
     const config = loadConfig({ PARCHE_DATA_DIR: './mydata' });
     expect(config.dataDir).toBe(resolve('./mydata'));
   });
+
+  it('PARCHE_TRUST_PROXY absent → trustProxy is empty string', () => {
+    const config = loadConfig({});
+    expect(config.trustProxy).toBe('');
+  });
+
+  it('PARCHE_TRUST_PROXY valid single IP is preserved', () => {
+    const config = loadConfig({ PARCHE_TRUST_PROXY: '172.28.0.1' });
+    expect(config.trustProxy).toBe('172.28.0.1');
+  });
+
+  it('PARCHE_TRUST_PROXY valid comma-separated list is preserved', () => {
+    const config = loadConfig({ PARCHE_TRUST_PROXY: '127.0.0.1,172.28.0.1' });
+    expect(config.trustProxy).toBe('127.0.0.1,172.28.0.1');
+  });
+
+  it('PARCHE_TRUST_PROXY valid CIDR is preserved', () => {
+    const config = loadConfig({ PARCHE_TRUST_PROXY: '172.28.0.0/16' });
+    expect(config.trustProxy).toBe('172.28.0.0/16');
+  });
+
+  it('PARCHE_TRUST_PROXY accepts IPv6 and IPv6 CIDR', () => {
+    expect(loadConfig({ PARCHE_TRUST_PROXY: '::1,fd00::/8' }).trustProxy).toBe('::1,fd00::/8');
+  });
+
+  it('PARCHE_TRUST_PROXY rejects hex-looking tokens that are not IPs and out-of-range prefixes', () => {
+    for (const bad of [
+      'deadbeef',
+      'abc',
+      '172.28.0.1/33',
+      '::1/129',
+      '10.0.0.1/8/8',
+      '256.1.1.1',
+    ]) {
+      expect(() => loadConfig({ PARCHE_TRUST_PROXY: bad })).toThrow(ConfigError);
+    }
+  });
+
+  it('PARCHE_TRUST_PROXY garbage throws ConfigError naming the variable', () => {
+    expect(() => loadConfig({ PARCHE_TRUST_PROXY: 'not-an-ip!!' })).toThrow(ConfigError);
+    try {
+      loadConfig({ PARCHE_TRUST_PROXY: 'not-an-ip!!' });
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).message).toMatch(/PARCHE_TRUST_PROXY/);
+    }
+  });
 });
 
 describe('AC9 integration — spawnSync with PORT=abc', () => {

@@ -71,8 +71,9 @@ src/
     logging.test.ts   # verifica redacción de tokens en logs pino
     tokens.ts         # generateDeviceToken, hashToken, generateInviteCode, etc.
   admin/
-    commands.ts       # createGroup, createInvite, listMembers, revokeDevice, revokeInvite, createDevice
-    cli.ts            # entrypoint del admin CLI
+    commands.ts       # createGroup, createInvite, listMembers, revokeDevice, revokeInvite, createDevice, backupDb
+    cli.ts            # entrypoint del admin CLI (incluye backup-db <dest>)
+    backup-db.test.ts # test del comando backup-db (integridad + datos)
   db/
     client.ts         # openDb → { db: AppDb, raw: RawDb }
     migrate.ts        # runMigrations(rawDb)
@@ -83,17 +84,37 @@ src/
     blob-path.ts            # HASH_RE, isValidHash, blobPath
     filesystem-storage.ts   # FilesystemStorage implements StoragePort
   routes/
-    health.ts          # GET /health
+    health.ts                   # GET /health
     health.test.ts
-    blobs.ts           # PUT/GET/HEAD /api/blob/:hash (auth requerida, scope por grupo)
+    blobs.ts                    # PUT/GET/HEAD /api/blob/:hash (auth requerida, scope por grupo)
     blobs.test.ts
-    join.ts            # POST /api/join (rate-limited, sin auth)
+    join.ts                     # POST /api/join (rate-limited, sin auth)
     join.test.ts
-    changes.ts         # GET /api/g/:slug/changes (auth + can('read'))
+    join.trust-proxy.test.ts    # tests de trustProxy con X-Forwarded-For (AC5)
+    changes.ts                  # GET /api/g/:slug/changes (auth + can('read'))
     changes.test.ts
-    push.ts            # POST /api/g/:slug/push (auth + can('write'))
+    push.ts                     # POST /api/g/:slug/push (auth + can('write'))
     push.test.ts
+Dockerfile          # multi-stage, node:22-bookworm-slim, USER node, HEALTHCHECK via fetch
+.dockerignore
+docker-compose.yml  # servicio parche, loopback-only port, red con subred fija
+deploy/
+  nginx/
+    parche.chamba.tools.conf  # ejemplo para sites-available
+  backup.sh         # backup en caliente (SQLite Online Backup API + tar de blobs)
+  restore.md        # guía de restauración paso a paso
 ```
+
+## Variables de entorno (resumen)
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `PORT` | `8787` | Puerto de escucha |
+| `HOST` | `127.0.0.1` | Host de bind (Docker lo pisa con `0.0.0.0`) |
+| `PARCHE_DATA_DIR` | `./data` | Directorio de datos (Docker lo pisa con `/data`) |
+| `PARCHE_MAX_BLOB_BYTES` | `20971520` | Tamaño máximo de blob (20 MiB) |
+| `PARCHE_LOG_LEVEL` | `info` | Nivel de log de pino |
+| `PARCHE_TRUST_PROXY` | `` (vacío) | IPs/CIDRs de proxy confiables para `X-Forwarded-For`. En producción Docker: `172.28.0.1` |
 
 ## Modelo de datos (8 tablas)
 

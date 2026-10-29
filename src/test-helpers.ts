@@ -32,6 +32,7 @@ export function makeConfig(dataDir: string, overrides: Partial<Config> = {}): Co
     dataDir,
     maxBlobBytes: 20971520,
     logLevel: 'silent',
+    trustProxy: '',
     ...overrides,
   };
 }
