@@ -1,14 +1,9 @@
 import type { PushResult } from '@chamba/core';
 import { isSyncable, pathKey, pushRequestSchema, pushResponseSchema } from '@chamba/core';
-import { and, eq, isNotNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { authenticate, requireCan } from '../auth/plugin.js';
 import { blobRefs, changes, files, groups } from '../db/schema.js';
-import type { StoragePort } from '../storage/storage-port.js';
-
-interface PushPluginOptions {
-  storage: StoragePort;
-}
 
 // ---------------------------------------------------------------------------
 // Sentinel error for case collisions — thrown inside the transaction
@@ -28,9 +23,7 @@ class CaseCollisionError extends Error {
 // Route
 // ---------------------------------------------------------------------------
 
-export async function pushRoutes(app: FastifyInstance, opts: PushPluginOptions): Promise<void> {
-  const { storage } = opts;
-
+export async function pushRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { slug: string } }>(
     '/api/g/:slug/push',
     { preHandler: [authenticate, requireCan('write')] },
@@ -49,21 +42,31 @@ export async function pushRoutes(app: FastifyInstance, opts: PushPluginOptions):
         }
       }
 
-      // 3. Blob presence check (async, before the sync transaction)
-      const missingHashes: string[] = [];
-      await Promise.all(
-        pushChanges.map(async ({ newHash }) => {
-          if (newHash !== null && !(await storage.has(newHash))) {
-            missingHashes.push(newHash);
-          }
-        }),
-      );
-      if (missingHashes.length > 0) {
-        return reply.status(422).send({ error: 'missing_blobs', hashes: missingHashes });
+      const groupId = request.auth.groupId;
+
+      // 3. Blob presence check, scoped to the token's group. A hash counts as
+      // present only if this group uploaded it via PUT (which verifies the
+      // content = proof of possession). A global storage check would let a
+      // group that merely knows a hash claim another group's blob.
+      const wantedHashes = [
+        ...new Set(pushChanges.flatMap(({ newHash }) => (newHash === null ? [] : [newHash]))),
+      ];
+      if (wantedHashes.length > 0) {
+        const owned = new Set(
+          app.db
+            .select({ hash: blobRefs.hash })
+            .from(blobRefs)
+            .where(and(eq(blobRefs.groupId, groupId), inArray(blobRefs.hash, wantedHashes)))
+            .all()
+            .map((r) => r.hash),
+        );
+        const missingHashes = wantedHashes.filter((h) => !owned.has(h));
+        if (missingHashes.length > 0) {
+          return reply.status(422).send({ error: 'missing_blobs', hashes: missingHashes });
+        }
       }
 
       // 4. Sync transaction
-      const groupId = request.auth.groupId;
       const userId = request.auth.userId;
       const deviceId = request.auth.deviceId;
       const now = new Date().toISOString();
@@ -149,11 +152,6 @@ export async function pushRoutes(app: FastifyInstance, opts: PushPluginOptions):
               tx.insert(changes)
                 .values({ groupId, seq, path, hash: newHash, userId, deviceId, at: now })
                 .run();
-
-              // Upsert blob_ref only when there is a new hash
-              if (newHash !== null) {
-                tx.insert(blobRefs).values({ groupId, hash: newHash }).onConflictDoNothing().run();
-              }
 
               // Update liveByKey (never delete — set to null for tombstones)
               liveByKey.set(key, newHash !== null ? path : null);

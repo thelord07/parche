@@ -72,7 +72,7 @@ export async function buildServer(
   await app.register(blobRoutes, { storage });
   await app.register(joinRoutes);
   await app.register(changesRoutes);
-  await app.register(pushRoutes, { storage });
+  await app.register(pushRoutes);
 
   // Safety net: any /api/blob/* path that reaches the not-found handler returns 400,
   // so path traversal attempts are never silently 404'd.

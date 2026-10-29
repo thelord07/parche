@@ -140,30 +140,33 @@ Query params: `since` (seq, default 0), `limit` (1–1000, default 500).
 
 ### `POST /api/g/:slug/push`
 
-Auth required (`can('write')`).
+Auth required (`can('write')`, otherwise `403`). Body is `pushRequestSchema` from `@chamba/core`:
 
 ```json
 {
+  "protocol": 1,
   "changes": [
-    { "path": "note.md", "expectedHash": "<sha256|null>", "newHash": "<sha256|null>" }
+    { "path": "note.md", "baseHash": "<sha256|null>", "newHash": "<sha256|null>" }
   ]
 }
 ```
 
-Response `200`:
+Entries are applied **in the order received**, in one transaction. Response `200` (`pushResponseSchema`):
 ```json
 {
   "results": [
-    { "path": "note.md", "outcome": "ok", "seq": 5 }
+    { "status": "ok", "path": "note.md", "seq": 5 },
+    { "status": "conflict", "path": "other.md", "currentHash": "<sha256|null>" }
   ]
 }
 ```
 
-Outcomes: `ok` | `conflict` | `error`.
+Per entry: `newHash === head` → `ok` with the current `seq` (idempotent retry, no new change); `baseHash === head` → new `seq`; otherwise → `conflict` with the current head. `newHash: null` is a delete (tombstone).
 
-- `400` — invalid body or unsyncable path (`.obsidian/`, `.git/`)
-- `409` — case collision (two paths with same case-folded key in one push)
-- `422` — blob not uploaded (push references a hash not in storage)
+Whole-request errors (nothing is applied):
+- `400` — invalid body, or a path that is not syncable (`.obsidian/`, `x.exe`, …)
+- `422 {error:'missing_blobs', hashes}` — a `newHash` this group has not uploaded. A hash counts as present only if the token's group stored it with `PUT /api/blob/:hash` (which verifies the content); a blob uploaded by another group does not count. Upload the blobs and retry.
+- `409 {error:'case_collision', path, existing}` — a live `newHash` whose case-folded path belongs to another live path of the group. A delete of the old name earlier in the same push frees it, so a casing rename `[Nota.md→null, nota.md→H]` is valid.
 
 ### `PUT /api/blob/:hash`
 

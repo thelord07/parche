@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createGroup, createInvite } from '../admin/commands.js';
-import { changes, files } from '../db/schema.js';
+import { blobRefs, changes, files } from '../db/schema.js';
 import { cleanupDir, makeApp, makeTempDataDir, seedGroupWithDevice } from '../test-helpers.js';
 
 function sha256(buf: Buffer): string {
@@ -160,6 +160,62 @@ describe('POST /api/g/:slug/push', () => {
     // No changes inserted
     const allChanges = app.db.select().from(changes).all();
     expect(allChanges).toHaveLength(0);
+  });
+
+  // --------------------------------------------------------------------------
+  // B1 (review): a blob counts as present only if the token's group uploaded it
+  // --------------------------------------------------------------------------
+  it('B1: group B cannot claim group A blob by pushing its hash without uploading it', async () => {
+    const a = await seedGroupWithDevice(app, { slug: 'b1-group-a' });
+    const b = await seedGroupWithDevice(app, { slug: 'b1-group-b' });
+
+    // Group A uploads and pushes H — the blob now exists on disk
+    const h = await putBlob(app, Buffer.from('# secreto de A\nclave del negocio'), a.authHeader);
+    const pushA = await app.inject({
+      method: 'POST',
+      url: `/api/g/${a.groupSlug}/push`,
+      headers: { authorization: a.authHeader, 'content-type': 'application/json' },
+      payload: { protocol: 1, changes: [{ path: 'secreto.md', baseHash: null, newHash: h }] },
+    });
+    expect(pushA.statusCode).toBe(200);
+
+    // Group B pushes robado.md → H without uploading it → 422
+    const pushB = await app.inject({
+      method: 'POST',
+      url: `/api/g/${b.groupSlug}/push`,
+      headers: { authorization: b.authHeader, 'content-type': 'application/json' },
+      payload: { protocol: 1, changes: [{ path: 'robado.md', baseHash: null, newHash: h }] },
+    });
+    expect(pushB.statusCode).toBe(422);
+    expect(pushB.json()).toEqual({ error: 'missing_blobs', hashes: [h] });
+
+    // Group B still cannot read H
+    const getB = await app.inject({
+      method: 'GET',
+      url: `/api/blob/${h}`,
+      headers: { authorization: b.authHeader },
+    });
+    expect(getB.statusCode).toBe(404);
+
+    // Nothing was recorded for group B: no file row, no change, no blob_ref
+    const bFiles = app.db
+      .select()
+      .from(files)
+      .all()
+      .filter((f) => f.groupId === b.groupId);
+    expect(bFiles).toHaveLength(0);
+    const bChanges = app.db
+      .select()
+      .from(changes)
+      .all()
+      .filter((c) => c.groupId === b.groupId);
+    expect(bChanges).toHaveLength(0);
+    const refsForH = app.db
+      .select()
+      .from(blobRefs)
+      .all()
+      .filter((r) => r.hash === h);
+    expect(refsForH.map((r) => r.groupId)).toEqual([a.groupId]);
   });
 
   // --------------------------------------------------------------------------

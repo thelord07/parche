@@ -106,7 +106,7 @@ src/
 | `invites` | Códigos de invitación (code_hash, role, expires_at, max_uses, uses) |
 | `files` | Estado actual de archivos (head_hash, head_seq, path_key) |
 | `changes` | Log de cambios append-only (seq, path, hash) |
-| `blob_refs` | Scope de blobs por grupo (group_id, hash) |
+| `blob_refs` | Scope de blobs por grupo (group_id, hash). Solo lo escribe el `PUT` de blobs (prueba de posesión); el push nunca lo inserta |
 
 ## Advertencia de seguridad
 
@@ -132,3 +132,10 @@ El archivo `src/no-destructive.test.ts` verifica automáticamente que no se intr
 - `requireCan(action)` preHandler factory: usa `can()` de @chamba/core
 - `request.auth: RequestAuth` contiene `deviceId`, `userId`, `groupId`, `groupSlug`, `role`
 - Pino redacta `req.headers.authorization` y `res.body.deviceToken` en los logs
+
+## Blobs entre grupos (no negociable)
+
+Un grupo solo ve y usa los blobs que **él mismo subió** con `PUT /api/blob/:hash`, que verifica que el contenido coincide con el hash (prueba de posesión). Por eso:
+
+- `GET`/`HEAD` devuelven `404` si no existe `blob_refs(grupo del token, hash)`, aunque el blob esté en disco.
+- En `/push`, un `newHash` cuenta como presente solo si existe `blob_refs(grupo del token, newHash)`; si no, `422 missing_blobs`. **Nunca** se usa `storage.has` global, y el push **no** inserta `blob_refs`. Si lo hiciera, cualquiera que conozca un hash podría reclamar el blob de otro grupo y leerlo (review PARCHE-003, B1).
