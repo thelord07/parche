@@ -1,5 +1,8 @@
 import { PassThrough, Readable } from 'node:stream';
+import { and, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
+import { authenticate } from '../auth/plugin.js';
+import { blobRefs } from '../db/schema.js';
 import { isValidHash } from '../storage/blob-path.js';
 import {
   BlobTooLargeError,
@@ -23,95 +26,133 @@ export async function blobRoutes(app: FastifyInstance, opts: BlobPluginOptions):
     done(null, payload);
   });
 
-  // PUT /api/blob/:hash — store a blob
-  app.put<{ Params: { hash: string } }>('/api/blob/:hash', async (request, reply) => {
-    const { hash } = request.params;
+  // PUT /api/blob/:hash — store a blob (auth required; upserts blob_refs)
+  app.put<{ Params: { hash: string } }>(
+    '/api/blob/:hash',
+    { preHandler: [authenticate] },
+    async (request, reply) => {
+      const { hash } = request.params;
 
-    if (!isValidHash(hash)) {
-      return reply.status(400).send({ error: 'invalid hash' });
-    }
-
-    // The plugin-level catch-all parser passes the raw stream as request.body.
-    // An empty body arrives as undefined; wrap it in an empty readable.
-    let body: Readable;
-    if (request.body instanceof Readable) {
-      body = request.body;
-    } else if (request.body == null) {
-      body = Readable.from([]);
-    } else {
-      // Unexpected body type — reject rather than silently coerce.
-      return reply.status(400).send({ error: 'unexpected body type' });
-    }
-
-    const passthru = new PassThrough();
-    body.pipe(passthru);
-
-    try {
-      const result = await storage.put(hash, passthru);
-      const status = result.created ? 201 : 200;
-      return reply.status(status).send({ hash, size: result.size });
-    } catch (err) {
-      if (err instanceof InvalidHashError) {
+      if (!isValidHash(hash)) {
         return reply.status(400).send({ error: 'invalid hash' });
       }
-      if (err instanceof HashMismatchError) {
-        return reply.status(400).send({ error: 'hash mismatch' });
+
+      // The plugin-level catch-all parser passes the raw stream as request.body.
+      // An empty body arrives as undefined; wrap it in an empty readable.
+      let body: Readable;
+      if (request.body instanceof Readable) {
+        body = request.body;
+      } else if (request.body == null) {
+        body = Readable.from([]);
+      } else {
+        // Unexpected body type — reject rather than silently coerce.
+        return reply.status(400).send({ error: 'unexpected body type' });
       }
-      if (err instanceof BlobTooLargeError) {
-        // Signal the client to stop sending. After the 413 response is flushed,
-        // destroy the request socket so we do not drain an unbounded body.
-        // In inject() mode request.raw.destroy() is a no-op, which is fine because
-        // light-my-request has already buffered the full payload.
-        reply.header('connection', 'close');
-        reply.raw.once('finish', () => {
-          if (!request.raw.destroyed) {
-            request.raw.destroy();
-          }
-        });
-        return reply.status(413).send({ error: 'blob too large' });
+
+      const passthru = new PassThrough();
+      body.pipe(passthru);
+
+      try {
+        const result = await storage.put(hash, passthru);
+        // Upsert blob_refs to track which group owns this blob
+        request.server.db
+          .insert(blobRefs)
+          .values({ groupId: request.auth.groupId, hash })
+          .onConflictDoNothing()
+          .run();
+        const status = result.created ? 201 : 200;
+        return reply.status(status).send({ hash, size: result.size });
+      } catch (err) {
+        if (err instanceof InvalidHashError) {
+          return reply.status(400).send({ error: 'invalid hash' });
+        }
+        if (err instanceof HashMismatchError) {
+          return reply.status(400).send({ error: 'hash mismatch' });
+        }
+        if (err instanceof BlobTooLargeError) {
+          // Signal the client to stop sending. After the 413 response is flushed,
+          // destroy the request socket so we do not drain an unbounded body.
+          // In inject() mode request.raw.destroy() is a no-op, which is fine because
+          // light-my-request has already buffered the full payload.
+          reply.header('connection', 'close');
+          reply.raw.once('finish', () => {
+            if (!request.raw.destroyed) {
+              request.raw.destroy();
+            }
+          });
+          return reply.status(413).send({ error: 'blob too large' });
+        }
+        throw err;
       }
-      throw err;
-    }
-  });
+    },
+  );
 
-  // GET /api/blob/:hash — retrieve a blob
-  app.get<{ Params: { hash: string } }>('/api/blob/:hash', async (request, reply) => {
-    const { hash } = request.params;
+  // GET /api/blob/:hash — retrieve a blob (auth required; scoped to token's group)
+  app.get<{ Params: { hash: string } }>(
+    '/api/blob/:hash',
+    { preHandler: [authenticate] },
+    async (request, reply) => {
+      const { hash } = request.params;
 
-    if (!isValidHash(hash)) {
-      return reply.status(400).send({ error: 'invalid hash' });
-    }
+      if (!isValidHash(hash)) {
+        return reply.status(400).send({ error: 'invalid hash' });
+      }
 
-    const blobSize = await storage.size(hash);
-    if (blobSize === null) {
-      return reply.status(404).send({ error: 'not found' });
-    }
+      // Check blob_refs for this group — prevents cross-group access
+      const ref = request.server.db
+        .select()
+        .from(blobRefs)
+        .where(and(eq(blobRefs.groupId, request.auth.groupId), eq(blobRefs.hash, hash)))
+        .get();
+      if (!ref) {
+        return reply.status(404).send({ error: 'not found' });
+      }
 
-    const stream = await storage.get(hash);
-    if (stream === null) {
-      return reply.status(404).send({ error: 'not found' });
-    }
+      const blobSize = await storage.size(hash);
+      if (blobSize === null) {
+        return reply.status(404).send({ error: 'not found' });
+      }
 
-    reply.header('content-type', 'application/octet-stream');
-    reply.header('content-length', String(blobSize));
-    return reply.status(200).send(stream);
-  });
+      const stream = await storage.get(hash);
+      if (stream === null) {
+        return reply.status(404).send({ error: 'not found' });
+      }
 
-  // HEAD /api/blob/:hash — check existence and size
-  app.head<{ Params: { hash: string } }>('/api/blob/:hash', async (request, reply) => {
-    const { hash } = request.params;
+      reply.header('content-type', 'application/octet-stream');
+      reply.header('content-length', String(blobSize));
+      return reply.status(200).send(stream);
+    },
+  );
 
-    if (!isValidHash(hash)) {
-      return reply.status(400).send();
-    }
+  // HEAD /api/blob/:hash — check existence and size (auth required; scoped to token's group)
+  app.head<{ Params: { hash: string } }>(
+    '/api/blob/:hash',
+    { preHandler: [authenticate] },
+    async (request, reply) => {
+      const { hash } = request.params;
 
-    const blobSize = await storage.size(hash);
-    if (blobSize === null) {
-      return reply.status(404).send();
-    }
+      if (!isValidHash(hash)) {
+        return reply.status(400).send();
+      }
 
-    reply.header('content-type', 'application/octet-stream');
-    reply.header('content-length', String(blobSize));
-    return reply.status(200).send();
-  });
+      // Check blob_refs for this group — prevents cross-group access
+      const ref = request.server.db
+        .select()
+        .from(blobRefs)
+        .where(and(eq(blobRefs.groupId, request.auth.groupId), eq(blobRefs.hash, hash)))
+        .get();
+      if (!ref) {
+        return reply.status(404).send();
+      }
+
+      const blobSize = await storage.size(hash);
+      if (blobSize === null) {
+        return reply.status(404).send();
+      }
+
+      reply.header('content-type', 'application/octet-stream');
+      reply.header('content-length', String(blobSize));
+      return reply.status(200).send();
+    },
+  );
 }

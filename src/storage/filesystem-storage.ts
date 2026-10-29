@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, rename, stat, unlink } from 'node:fs/promises';
+import { link, mkdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pipeline as pipelineCallback, Readable, Writable } from 'node:stream';
 import { promisify } from 'node:util';
@@ -42,7 +42,7 @@ export class FilesystemStorage implements StoragePort {
       return { created: false, size: existingSize };
     }
 
-    // New blob: stream to a temp file, verify digest, then rename into place atomically.
+    // New blob: stream to a temp file, verify digest, then hard-link into place atomically.
     await mkdir(this.tmpDir, { recursive: true });
     const tmpPath = join(this.tmpDir, `${hash}.${process.pid}.${randomUUID()}.tmp`);
 
@@ -76,36 +76,41 @@ export class FilesystemStorage implements StoragePort {
       digest = hasher.digest('hex');
       bytesWritten = accumulated;
     } catch (err) {
-      // Clean up own temp file on any error. This is the only path removal in this module.
-      await safeUnlinkTmp(tmpPath);
+      // Clean up own temp file on any error via the single allowed removal.
+      await cleanupTmp(tmpPath);
       throw err;
     }
 
     if (digest !== hash) {
-      // Digest mismatch — clean up own temp file. This is the only path removal in this module.
-      await safeUnlinkTmp(tmpPath);
+      // Digest mismatch — clean up own temp file via the single allowed removal.
+      await cleanupTmp(tmpPath);
       throw new HashMismatchError(hash);
     }
 
-    // Ensure shard directory exists, then move temp into place atomically.
+    // Ensure shard directory exists, then hard-link temp into place atomically.
+    // link() throws EEXIST if the destination already exists (unlike rename which
+    // would silently overwrite), so exactly one concurrent winner gets created:true
+    // and the rest get created:false.
     const dest = blobPath(this.blobsDir, hash);
     const shardDir = join(this.blobsDir, hash.slice(0, 2), hash.slice(2, 4));
     await mkdir(shardDir, { recursive: true });
 
     try {
-      await rename(tmpPath, dest);
+      await link(tmpPath, dest);
     } catch (err) {
       const nodeErr = err as NodeJS.ErrnoException;
       if (nodeErr.code === 'EEXIST') {
-        // Race guard: another process stored the same blob concurrently.
+        // Race: another process stored the same blob concurrently.
         // Clean up own temp file — the stored blob is unaffected.
-        await safeUnlinkTmp(tmpPath);
+        await cleanupTmp(tmpPath);
         return { created: false, size: bytesWritten };
       }
-      await safeUnlinkTmp(tmpPath);
+      await cleanupTmp(tmpPath);
       throw err;
     }
 
+    // Hard link created: remove the tmp file (it is now an extra link to the blob inode).
+    await cleanupTmp(tmpPath);
     return { created: true, size: bytesWritten };
   }
 
@@ -170,10 +175,11 @@ export class FilesystemStorage implements StoragePort {
 }
 
 /**
- * Remove own temp file on error — never touches blob storage paths.
+ * Remove own temp file — the single removal in this module.
+ * Never touches blob storage paths (under `blobs/`).
  * Swallows ENOENT so double-cleanup is safe.
  */
-async function safeUnlinkTmp(tmpPath: string): Promise<void> {
+async function cleanupTmp(tmpPath: string): Promise<void> {
   try {
     await unlink(tmpPath);
   } catch (err) {

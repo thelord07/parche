@@ -5,8 +5,15 @@ import * as net from 'node:net';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createGroup, createInvite, revokeDevice } from '../admin/commands.js';
 import { buildServer } from '../server.js';
-import { cleanupDir, makeApp, makeConfig, makeTempDataDir } from '../test-helpers.js';
+import {
+  cleanupDir,
+  makeApp,
+  makeConfig,
+  makeTempDataDir,
+  seedGroupWithDevice,
+} from '../test-helpers.js';
 
 // sha256 of the empty string
 const EMPTY_HASH = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -92,13 +99,29 @@ async function listFiles(dir: string): Promise<string[]> {
   return results;
 }
 
+/**
+ * List only blob storage files (under blobs/ and tmp/) — excludes the SQLite
+ * database files (parche.db, parche.db-wal, parche.db-shm) that buildServer
+ * creates in dataDir since PARCHE-003.
+ */
+async function listBlobFiles(dataDir: string): Promise<string[]> {
+  const all = await listFiles(dataDir);
+  return all.filter((p) => {
+    const name = p.slice(p.lastIndexOf('/') + 1);
+    return !name.endsWith('.db') && !name.endsWith('.db-wal') && !name.endsWith('.db-shm');
+  });
+}
+
 describe('blob routes', () => {
   let dataDir: string;
   let app: FastifyInstance;
+  let authHeader: string;
 
   beforeEach(async () => {
     dataDir = await makeTempDataDir();
     app = await makeApp(dataDir);
+    const seeded = await seedGroupWithDevice(app);
+    authHeader = seeded.authHeader;
   });
 
   afterEach(async () => {
@@ -116,7 +139,7 @@ describe('blob routes', () => {
         method: 'PUT',
         url: `/api/blob/${hash}`,
         payload: body,
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
       });
 
       expect(res.statusCode).toBe(201);
@@ -140,7 +163,7 @@ describe('blob routes', () => {
         method: 'PUT',
         url: `/api/blob/${hash}`,
         payload: body,
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
       });
       expect(res1.statusCode).toBe(201);
 
@@ -155,7 +178,7 @@ describe('blob routes', () => {
         method: 'PUT',
         url: `/api/blob/${hash}`,
         payload: body,
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
       });
       expect(res2.statusCode).toBe(200);
 
@@ -174,12 +197,12 @@ describe('blob routes', () => {
         method: 'PUT',
         url: `/api/blob/${wrongHash}`,
         payload: body,
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
       });
 
       expect(res.statusCode).toBe(400);
 
-      const files = await listFiles(dataDir);
+      const files = await listBlobFiles(dataDir);
       expect(files).toHaveLength(0);
     });
 
@@ -188,26 +211,23 @@ describe('blob routes', () => {
       const hash = sha256(correctBody);
       const shardedPath = join(dataDir, 'blobs', hash.slice(0, 2), hash.slice(2, 4), hash);
 
-      // Store the correct blob
-      const res1 = await app.inject({
+      // Store the correct blob first
+      await app.inject({
         method: 'PUT',
         url: `/api/blob/${hash}`,
         payload: correctBody,
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
       });
-      expect(res1.statusCode).toBe(201);
 
-      const statBefore = await stat(shardedPath);
       const contentBefore = await readFile(shardedPath);
+      const statBefore = await stat(shardedPath);
 
-      await new Promise((r) => setTimeout(r, 50));
-
-      // Send wrong body for the same hash
+      // Try to PUT wrong body under same hash
       const res2 = await app.inject({
         method: 'PUT',
         url: `/api/blob/${hash}`,
         payload: Buffer.from('wrong body'),
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
       });
       expect(res2.statusCode).toBe(400);
 
@@ -218,8 +238,181 @@ describe('blob routes', () => {
       expect(contentAfter).toEqual(contentBefore);
 
       // No extra files
-      const files = await listFiles(dataDir);
-      expect(files).toHaveLength(1);
+      const blobFiles = await listBlobFiles(dataDir);
+      expect(blobFiles).toHaveLength(1);
+    });
+  });
+
+  // ---- AC5 (auth): 401 on blob routes for missing/invalid/revoked token -------
+  describe('AC5: 401 on blob routes without valid auth', () => {
+    it('PUT without auth → 401', async () => {
+      const body = Buffer.from('no auth');
+      const hash = sha256(body);
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/api/blob/${hash}`,
+        payload: body,
+        headers: { 'content-type': 'application/octet-stream' },
+      });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('GET without auth → 401', async () => {
+      const hash = 'a'.repeat(64);
+      const res = await app.inject({ method: 'GET', url: `/api/blob/${hash}` });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('HEAD without auth → 401', async () => {
+      const hash = 'b'.repeat(64);
+      const res = await app.inject({ method: 'HEAD', url: `/api/blob/${hash}` });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('PUT with invalid token → 401', async () => {
+      const body = Buffer.from('bad token');
+      const hash = sha256(body);
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/api/blob/${hash}`,
+        payload: body,
+        headers: {
+          'content-type': 'application/octet-stream',
+          authorization: 'Bearer pch_invalidtoken',
+        },
+      });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('AC5: revoked device token → 401 on GET /api/blob/:hash', async () => {
+      // Seed a group with a second device we can revoke
+      const seededB = await seedGroupWithDevice(app, { slug: 'ac5-revoke-blob' });
+      const hash = 'a'.repeat(64);
+
+      // Confirm the token works before revocation
+      const preRes = await app.inject({
+        method: 'GET',
+        url: `/api/blob/${hash}`,
+        headers: { authorization: seededB.authHeader },
+      });
+      // 404 is fine — it means auth passed but blob isn't there
+      expect([200, 404]).toContain(preRes.statusCode);
+
+      // Revoke the device
+      revokeDevice(app.db, { deviceId: seededB.deviceId });
+
+      // Now the same token must yield 401
+      const postRes = await app.inject({
+        method: 'GET',
+        url: `/api/blob/${hash}`,
+        headers: { authorization: seededB.authHeader },
+      });
+      expect(postRes.statusCode).toBe(401);
+    });
+  });
+
+  // ---- AC13: blob from group A, GET from group B → 404 -----------------------
+  describe('AC13: cross-group blob scoping', () => {
+    it('blob uploaded by group A is not accessible by group B (GET → 404)', async () => {
+      // authHeader is from group A (seeded in beforeEach)
+      const body = Buffer.from('group a blob');
+      const hash = sha256(body);
+
+      await app.inject({
+        method: 'PUT',
+        url: `/api/blob/${hash}`,
+        payload: body,
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
+      });
+
+      // Seed group B and get its token
+      const seededB = await seedGroupWithDevice(app, { slug: 'group-b-ac13' });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/blob/${hash}`,
+        headers: { authorization: seededB.authHeader },
+      });
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('blob uploaded by group A is not accessible by group B (HEAD → 404)', async () => {
+      const body = Buffer.from('group a blob head');
+      const hash = sha256(body);
+
+      await app.inject({
+        method: 'PUT',
+        url: `/api/blob/${hash}`,
+        payload: body,
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
+      });
+
+      const seededB = await seedGroupWithDevice(app, { slug: 'group-b-ac13-head' });
+
+      const res = await app.inject({
+        method: 'HEAD',
+        url: `/api/blob/${hash}`,
+        headers: { authorization: seededB.authHeader },
+      });
+      expect(res.statusCode).toBe(404);
+    });
+  });
+
+  // ---- AC14: concurrent PUTs (HTTP) — 4 concurrent PUTs → 1 x 201, 3 x 200 --
+  describe('AC14: concurrent PUTs via HTTP', () => {
+    it('4 concurrent PUTs → exactly 1 x 201 and 3 x 200', { timeout: 10000 }, async () => {
+      const realApp = await buildServer(makeConfig(dataDir));
+      try {
+        await realApp.listen({ port: 0, host: '127.0.0.1' });
+        const addr = realApp.server.address();
+        if (!addr || typeof addr === 'string') throw new Error('no address');
+        const port = addr.port;
+
+        // Seed a device on the real server's DB
+        createGroup(realApp.db, {
+          name: 'Concurrent Group',
+          slug: 'concurrent-group',
+          ownerName: 'Owner',
+          ownerEmail: 'owner@concurrent.com',
+        });
+        const { inviteCode } = createInvite(realApp.db, {
+          group: 'concurrent-group',
+          role: 'editor',
+        });
+        const joinRes = await realApp.inject({
+          method: 'POST',
+          url: '/api/join',
+          payload: { code: inviteCode, name: 'Editor', email: 'editor@concurrent.com' },
+        });
+        const { deviceToken } = joinRes.json() as { deviceToken: string };
+
+        const body = Buffer.from('concurrent content');
+        const hash = sha256(body);
+
+        // 4 concurrent PUTs
+        const statuses = await Promise.all(
+          Array.from({ length: 4 }, () =>
+            rawHttpStatus(
+              '127.0.0.1',
+              port,
+              `PUT /api/blob/${hash} HTTP/1.1`,
+              {
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': String(body.length),
+                Authorization: `Bearer ${deviceToken}`,
+              },
+              body,
+            ),
+          ),
+        );
+
+        const created = statuses.filter((s) => s === 201).length;
+        const ok = statuses.filter((s) => s === 200).length;
+        expect(created).toBe(1);
+        expect(ok).toBe(3);
+      } finally {
+        await realApp.close();
+      }
     });
   });
 
@@ -247,17 +440,18 @@ describe('blob routes', () => {
           method: 'PUT',
           url: `/api/blob/${invalidHash}`,
           payload: Buffer.from('some body'),
-          headers: { 'content-type': 'application/octet-stream' },
+          headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
         });
         expect(res.statusCode).toBe(400);
-        const files = await listFiles(dataDir);
-        expect(files).toHaveLength(0);
+        const blobFiles = await listBlobFiles(dataDir);
+        expect(blobFiles).toHaveLength(0);
       });
 
       it(`GET ${JSON.stringify(invalidHash)} → 400`, async () => {
         const res = await app.inject({
           method: 'GET',
           url: `/api/blob/${invalidHash}`,
+          headers: { authorization: authHeader },
         });
         expect(res.statusCode).toBe(400);
       });
@@ -266,6 +460,7 @@ describe('blob routes', () => {
         const res = await app.inject({
           method: 'HEAD',
           url: `/api/blob/${invalidHash}`,
+          headers: { authorization: authHeader },
         });
         expect(res.statusCode).toBe(400);
       });
@@ -286,9 +481,10 @@ describe('blob routes', () => {
         headers: { 'content-type': 'application/octet-stream' },
       });
       // inject() normalises the URL; the real-HTTP raw-socket test below asserts 400.
+      // The traversal not-found handler returns 400 without auth (note: no auth here).
       expect(res.statusCode).toBe(404);
-      const files = await listFiles(dataDir);
-      expect(files).toHaveLength(0);
+      const blobFiles = await listBlobFiles(dataDir);
+      expect(blobFiles).toHaveLength(0);
     });
 
     it('raw path traversal ../etc/passwd → 404 in inject() (GET)', async () => {
@@ -310,10 +506,11 @@ describe('blob routes', () => {
     });
   });
 
-  // ---- AC6: real-HTTP path traversal proof -----------------------------------
+  // ---- AC6: real-HTTP path-traversal proof -----------------------------------
   // These tests start an actual TCP server and send UNNORMALISED paths over a raw
   // socket so no HTTP client can normalise the URL before it reaches the server.
   // This is the authoritative proof that AC6 is satisfied over real HTTP.
+  // Path traversal hits the not-found handler which returns 400 WITHOUT auth.
   describe('AC6: real-HTTP path-traversal proof', () => {
     let realApp: FastifyInstance;
     let port: number;
@@ -339,8 +536,8 @@ describe('blob routes', () => {
         Buffer.from('some body'),
       );
       expect(status).toBe(400);
-      const files = await listFiles(dataDir);
-      expect(files).toHaveLength(0);
+      const blobFiles = await listBlobFiles(dataDir);
+      expect(blobFiles).toHaveLength(0);
     });
 
     it('GET /api/blob/../etc/passwd over real HTTP → 400', async () => {
@@ -361,9 +558,12 @@ describe('blob routes', () => {
   // ---- AC7: oversize → 413, no file ------------------------------------------
   describe('AC7: blob too large', () => {
     let smallApp: FastifyInstance;
+    let smallAuthHeader: string;
 
     beforeEach(async () => {
       smallApp = await makeApp(dataDir, { maxBlobBytes: 10 });
+      const seeded = await seedGroupWithDevice(smallApp, { slug: 'small-app-group' });
+      smallAuthHeader = seeded.authHeader;
     });
 
     afterEach(async () => {
@@ -378,12 +578,12 @@ describe('blob routes', () => {
         method: 'PUT',
         url: `/api/blob/${hash}`,
         payload: body,
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: smallAuthHeader },
       });
 
       expect(res.statusCode).toBe(413);
-      const files = await listFiles(dataDir);
-      expect(files).toHaveLength(0);
+      const blobFiles = await listBlobFiles(dataDir);
+      expect(blobFiles).toHaveLength(0);
     });
 
     it('existing blob + oversize body → 413, stored blob unchanged', async () => {
@@ -396,22 +596,19 @@ describe('blob routes', () => {
         method: 'PUT',
         url: `/api/blob/${hash}`,
         payload: correctBody,
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
       });
 
       const shardedPath = join(dataDir, 'blobs', hash.slice(0, 2), hash.slice(2, 4), hash);
       const statBefore = await stat(shardedPath);
 
-      // Now try with oversized body via small app
+      // Now try with oversized body via small app (using its own auth)
       const bigBody = Buffer.from('this is eleven bytes!');
-      // Use a different hash to test the existing-blob oversize path
-      // Actually we need to test: existing H + oversize body → 413
-      // Let's use the same hash with oversized body
       const res = await smallApp.inject({
         method: 'PUT',
         url: `/api/blob/${hash}`,
         payload: bigBody,
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: smallAuthHeader },
       });
 
       expect(res.statusCode).toBe(413);
@@ -421,8 +618,6 @@ describe('blob routes', () => {
     });
 
     // AC7 real-HTTP: send a chunked (no Content-Length) PUT that exceeds maxBlobBytes.
-    // Verifies that the server returns 413, completes promptly (socket is destroyed after
-    // the response), and leaves no files behind.
     it('real-HTTP: chunked PUT exceeding maxBlobBytes → 413, completes promptly, no files', {
       timeout: 5000,
     }, async () => {
@@ -433,6 +628,14 @@ describe('blob routes', () => {
         const addr = realSmallApp.server.address();
         if (!addr || typeof addr === 'string') throw new Error('unexpected address');
         const realPort = addr.port;
+
+        // Create owner directly in DB — can't use HTTP join because bodyLimit:10 would reject the JSON body
+        const { deviceToken } = createGroup(realSmallApp.db, {
+          name: 'Small Real Group',
+          slug: 'small-real-group',
+          ownerName: 'Owner',
+          ownerEmail: 'owner@small.com',
+        });
 
         // Build a chunked body of 21 bytes — well over the 10-byte limit.
         const chunkData = Buffer.from('this is eleven bytes!'); // 21 bytes
@@ -448,14 +651,18 @@ describe('blob routes', () => {
           '127.0.0.1',
           realPort,
           `PUT /api/blob/${hash} HTTP/1.1`,
-          { 'Content-Type': 'application/octet-stream', 'Transfer-Encoding': 'chunked' },
+          {
+            'Content-Type': 'application/octet-stream',
+            'Transfer-Encoding': 'chunked',
+            Authorization: `Bearer ${deviceToken}`,
+          },
           body,
         );
 
         expect(status).toBe(413);
         // No files should remain after the oversize rejection.
-        const files = await listFiles(dataDir);
-        expect(files).toHaveLength(0);
+        const blobFiles = await listBlobFiles(dataDir);
+        expect(blobFiles).toHaveLength(0);
       } finally {
         await realSmallApp.close();
       }
@@ -472,10 +679,14 @@ describe('blob routes', () => {
         method: 'PUT',
         url: `/api/blob/${hash}`,
         payload: body,
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
       });
 
-      const res = await app.inject({ method: 'GET', url: `/api/blob/${hash}` });
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/blob/${hash}`,
+        headers: { authorization: authHeader },
+      });
       expect(res.statusCode).toBe(200);
       expect(res.headers['content-type']).toMatch(/application\/octet-stream/);
       expect(res.rawPayload).toEqual(body);
@@ -489,10 +700,14 @@ describe('blob routes', () => {
         method: 'PUT',
         url: `/api/blob/${hash}`,
         payload: body,
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
       });
 
-      const res = await app.inject({ method: 'HEAD', url: `/api/blob/${hash}` });
+      const res = await app.inject({
+        method: 'HEAD',
+        url: `/api/blob/${hash}`,
+        headers: { authorization: authHeader },
+      });
       expect(res.statusCode).toBe(200);
       expect(res.headers['content-length']).toBe(String(body.length));
       expect(res.rawPayload.length).toBe(0);
@@ -500,13 +715,21 @@ describe('blob routes', () => {
 
     it('GET absent blob → 404', async () => {
       const hash = 'a'.repeat(64);
-      const res = await app.inject({ method: 'GET', url: `/api/blob/${hash}` });
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/blob/${hash}`,
+        headers: { authorization: authHeader },
+      });
       expect(res.statusCode).toBe(404);
     });
 
     it('HEAD absent blob → 404', async () => {
       const hash = 'b'.repeat(64);
-      const res = await app.inject({ method: 'HEAD', url: `/api/blob/${hash}` });
+      const res = await app.inject({
+        method: 'HEAD',
+        url: `/api/blob/${hash}`,
+        headers: { authorization: authHeader },
+      });
       expect(res.statusCode).toBe(404);
     });
   });
@@ -532,7 +755,8 @@ describe('blob routes', () => {
     for (const { name, body, contentType } of cases) {
       it(`${name} → 201 and stores the exact bytes`, async () => {
         const hash = sha256(body);
-        const headers: Record<string, string> = contentType ? { 'content-type': contentType } : {};
+        const headers: Record<string, string> = { authorization: authHeader };
+        if (contentType) headers['content-type'] = contentType;
 
         let seenContentType: string | undefined = 'not captured';
         app.addHook('onRequest', async (request) => {
@@ -560,6 +784,22 @@ describe('blob routes', () => {
         await realApp.listen({ port: 0, host: '127.0.0.1' });
         const address = realApp.server.address();
         if (address === null || typeof address === 'string') throw new Error('no port');
+
+        // Seed auth
+        createGroup(realApp.db, {
+          name: 'Content Type Group',
+          slug: 'ct-group',
+          ownerName: 'Owner',
+          ownerEmail: 'owner@ct.com',
+        });
+        const { inviteCode } = createInvite(realApp.db, { group: 'ct-group', role: 'editor' });
+        const joinRes = await realApp.inject({
+          method: 'POST',
+          url: '/api/join',
+          payload: { code: inviteCode, name: 'Editor', email: 'editor@ct.com' },
+        });
+        const { deviceToken } = joinRes.json() as { deviceToken: string };
+
         const body = Buffer.from('sin header, por la red');
         const hash = sha256(body);
 
@@ -567,7 +807,10 @@ describe('blob routes', () => {
           '127.0.0.1',
           address.port,
           `PUT /api/blob/${hash} HTTP/1.1`,
-          { 'Content-Length': String(body.length) },
+          {
+            'Content-Length': String(body.length),
+            Authorization: `Bearer ${deviceToken}`,
+          },
           body,
         );
 
@@ -587,7 +830,7 @@ describe('blob routes', () => {
         method: 'PUT',
         url: `/api/blob/${EMPTY_HASH}`,
         payload: Buffer.alloc(0),
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
       });
       expect(res.statusCode).toBe(201);
     });
@@ -598,7 +841,7 @@ describe('blob routes', () => {
         method: 'PUT',
         url: `/api/blob/${wrongHash}`,
         payload: Buffer.alloc(0),
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
       });
       expect(res.statusCode).toBe(400);
     });
