@@ -11,12 +11,14 @@
  *   revoke-device   --device <id>
  *   revoke-invite   --group --code
  *   create-device   --group --email [--label]
+ *   backup-db       <dest>
  */
 import { parseArgs } from 'node:util';
 import { loadConfig } from '../config.js';
 import { openDb } from '../db/client.js';
 import { runMigrations } from '../db/migrate.js';
 import {
+  backupDb,
   createDevice,
   createGroup,
   createInvite,
@@ -30,7 +32,7 @@ async function main(): Promise<void> {
   if (!command) {
     process.stderr.write(
       'Usage: parche-admin <command> [options]\n' +
-        'Commands: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device\n',
+        'Commands: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device, backup-db\n',
     );
     process.exit(1);
   }
@@ -165,10 +167,22 @@ async function main(): Promise<void> {
         break;
       }
 
+      case 'backup-db': {
+        const dest = process.argv[3];
+        if (!dest || dest.trim() === '') {
+          throw new Error(
+            'Usage: backup-db <dest>\n  <dest> must be a non-empty path for the output .db file',
+          );
+        }
+        await backupDb(raw, dest);
+        process.stdout.write(`${JSON.stringify({ ok: true, dest })}\n`);
+        break;
+      }
+
       default: {
         throw new Error(
           `Unknown command '${command}'. ` +
-            'Available: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device',
+            'Available: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device, backup-db',
         );
       }
     }

@@ -38,6 +38,7 @@ pnpm start
 | `PARCHE_DATA_DIR` | `./data` | Directory for blobs and database |
 | `PARCHE_MAX_BLOB_BYTES` | `20971520` | Maximum blob size (20 MiB) |
 | `PARCHE_LOG_LEVEL` | `info` | Pino log level: `fatal\|error\|warn\|info\|debug\|trace\|silent` |
+| `PARCHE_TRUST_PROXY` | `` (empty) | Comma-separated IPs/CIDRs to trust for `X-Forwarded-For` (see Deploy) |
 
 Invalid values cause the process to exit with a non-zero code and a message naming the variable.
 
@@ -220,3 +221,131 @@ pnpm lint:write    # biome check --write (auto-fix)
 pnpm typecheck     # tsc --noEmit
 pnpm build         # typecheck + tsup
 ```
+
+## Deploy
+
+### Requirements
+
+- Ubuntu 24.04+ VPS with Docker 29+ and Docker Compose v2 installed
+- nginx already running and managing other sites
+- `certbot` available for TLS
+
+### First start
+
+```bash
+# 1. Clone / pull the repo
+git clone git@github-parche:<owner>/parche.git /srv/parche
+cd /srv/parche
+
+# 2. Create the data directory owned by uid 1000 (the `node` user in the container)
+install -d -o 1000 -g 1000 data
+
+# 3. Configure environment
+cp .env.example .env
+# Edit .env:
+#   - Set PARCHE_TRUST_PROXY=172.28.0.1 (gateway of the compose bridge)
+#   - Adjust PARCHE_SUBNET / PARCHE_GATEWAY if 172.28.0.0/16 conflicts
+#     (check with: ip -4 route && docker network ls)
+
+# 4. Start the container
+docker compose up -d --build
+
+# 5. Verify the port is bound to loopback only
+ss -tlnp | grep 8787   # must show 127.0.0.1:8787 — NOT 0.0.0.0:8787
+
+# 6. Health check
+curl http://127.0.0.1:8787/health
+# → {"status":"ok","version":"..."}
+```
+
+### nginx + TLS
+
+```bash
+# Install the example virtual-host config
+sudo cp deploy/nginx/parche.chamba.tools.conf /etc/nginx/sites-available/
+sudo ln -s /etc/nginx/sites-available/parche.chamba.tools.conf \
+           /etc/nginx/sites-enabled/
+
+# ALWAYS test before reloading — protects the other sites on this server
+sudo nginx -t && sudo systemctl reload nginx
+
+# Obtain a TLS certificate (certbot rewrites the config to add a 443 block)
+sudo certbot --nginx -d parche.chamba.tools
+
+# Final check
+curl https://parche.chamba.tools/health
+```
+
+### Updating
+
+```bash
+cd /srv/parche
+git pull
+docker compose up -d --build
+```
+
+### Logs
+
+```bash
+docker compose logs -f parche
+```
+
+### Admin commands (in production)
+
+Run any admin command inside the running container:
+
+```bash
+docker compose exec parche node dist/admin-cli.js create-group \
+  --name "My Group" --slug my-group \
+  --owner-name "Alice" --owner-email alice@example.com
+
+docker compose exec parche node dist/admin-cli.js create-invite \
+  --group my-group --role editor
+
+docker compose exec parche node dist/admin-cli.js list-members \
+  --group my-group
+
+docker compose exec parche node dist/admin-cli.js revoke-device \
+  --device <device-id>
+
+docker compose exec parche node dist/admin-cli.js revoke-invite \
+  --group my-group --code XXXX-XXXX
+
+docker compose exec parche node dist/admin-cli.js create-device \
+  --group my-group --email alice@example.com
+
+# Manual hot backup (also used by backup.sh)
+docker compose exec parche node dist/admin-cli.js backup-db /data/backup.db
+```
+
+### Backups
+
+`deploy/backup.sh` creates a daily hot backup of the SQLite database (via
+the Online Backup API — consistent even with WAL active) plus a tar of the
+blobs directory.
+
+```bash
+# Manual run
+BACKUP_DIR=/srv/parche-backups ./deploy/backup.sh
+
+# Set up a daily cron in root's crontab (edit with: sudo crontab -e)
+0 3 * * * cd /srv/parche && BACKUP_DIR=/srv/parche-backups ./deploy/backup.sh >> /var/log/parche-backup.log 2>&1
+```
+
+The script runs as root (the VPS is operated as root) and never creates
+anything under `./data`: the database snapshot is written inside the container
+by `backup-db`, which owns `/data`. If `./data/blobs` does not exist yet, the
+blob archive is skipped with a message; any `tar` error aborts the run with a
+non-zero exit code.
+
+The default retention is 14 days (`BACKUP_KEEP_DAYS`): dated directories older
+than 14 full days (`find -mtime +14`) are removed. Only directories matching
+`YYYY-MM-DD` inside `BACKUP_DIR` are ever removed.
+
+To verify a backup independently:
+```bash
+sqlite3 /srv/parche-backups/<date>/parche.db "PRAGMA integrity_check"
+# expected output: ok
+```
+
+For restore instructions see [`deploy/restore.md`](deploy/restore.md).

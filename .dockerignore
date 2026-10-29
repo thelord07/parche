@@ -1,0 +1,33 @@
+# Dependencies — rebuilt inside the image
+node_modules
+
+# Build output — rebuilt inside the image
+dist
+
+# Runtime data — never bake into the image
+data
+
+# Environment files with secrets — use docker-compose env_file instead
+.env
+.env.*
+# Exception: .env.example has no secrets and can stay visible (but it is NOT
+# copied to the image — it is simply not excluded from the build context
+# accidentally; the COPY instructions in the Dockerfile don't copy it anyway)
+
+# Version control
+.git
+.gitignore
+
+# Logs and coverage
+*.log
+coverage
+
+# macOS metadata
+.DS_Store
+
+# Deploy scripts run on the host, not inside the container
+deploy
+
+# Editor / IDE
+.vscode
+.idea

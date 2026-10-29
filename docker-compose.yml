@@ -1,0 +1,33 @@
+services:
+  parche:
+    build: .
+    restart: unless-stopped
+    # .env is never committed; copy from .env.example before the first `up`.
+    # Compose refuses to start if .env is missing.
+    env_file: .env
+    environment:
+      # These two always override whatever .env or the image ENV set.
+      # Without them, a dev .env with HOST=127.0.0.1 or PARCHE_DATA_DIR=./data
+      # would silently break the container (port unreachable / no persistence).
+      - HOST=0.0.0.0
+      - PARCHE_DATA_DIR=/data
+    ports:
+      # Bind to loopback only — Docker does NOT punch through ufw on 127.0.0.1.
+      # nginx on the host proxies to this port.
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./data:/data
+    networks:
+      - parche-net
+
+networks:
+  parche-net:
+    ipam:
+      config:
+        # Fixed subnet so the gateway is deterministic (172.28.0.1 by default).
+        # PARCHE_TRUST_PROXY=172.28.0.1 in .env makes Fastify trust X-Forwarded-For
+        # from nginx running on the host (traffic enters via the bridge gateway).
+        # Change PARCHE_SUBNET / PARCHE_GATEWAY in .env if this conflicts with
+        # an existing Docker network on your host (`ip -4 route` before first up).
+        - subnet: "${PARCHE_SUBNET:-172.28.0.0/16}"
+          gateway: "${PARCHE_GATEWAY:-172.28.0.1}"
