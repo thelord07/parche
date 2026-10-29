@@ -1,20 +1,78 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import rateLimit from '@fastify/rate-limit';
+import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
+import Fastify from 'fastify';
+import { registerAuth } from './auth/plugin.js';
 import type { Config } from './config.js';
+import type { AppDb, RawDb } from './db/client.js';
+import { openDb } from './db/client.js';
+import { runMigrations } from './db/migrate.js';
 import { blobRoutes } from './routes/blobs.js';
+import { changesRoutes } from './routes/changes.js';
 import { healthRoutes } from './routes/health.js';
+import { joinRoutes } from './routes/join.js';
+import { pushRoutes } from './routes/push.js';
 import { FilesystemStorage } from './storage/filesystem-storage.js';
 
-export async function buildServer(config: Config): Promise<FastifyInstance> {
+// ---------------------------------------------------------------------------
+// Fastify instance decoration typings
+// ---------------------------------------------------------------------------
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    db: AppDb;
+    rawDb: RawDb;
+  }
+}
+
+export async function buildServer(
+  config: Config,
+  logStream?: NodeJS.WritableStream,
+): Promise<FastifyInstance> {
+  const loggerOpts =
+    config.logLevel === 'silent'
+      ? false
+      : {
+          level: config.logLevel,
+          ...(logStream ? { stream: logStream } : {}),
+          redact: {
+            paths: ['req.headers.authorization', 'res.body.deviceToken'],
+            censor: '[REDACTED]',
+          },
+        };
+
   const app = Fastify({
-    logger: config.logLevel === 'silent' ? false : { level: config.logLevel },
+    logger: loggerOpts as FastifyBaseLogger | false,
     exposeHeadRoutes: false,
     bodyLimit: config.maxBlobBytes,
   });
+
+  // Open SQLite, run migrations before registering routes so the schema is
+  // always up-to-date when handlers execute.
+  const { db, raw: rawDb } = await openDb(config.dataDir);
+  runMigrations(rawDb);
+
+  app.decorate('db', db);
+  app.decorate('rawDb', rawDb);
+
+  // Close the database when the Fastify server closes so tests can clean
+  // up their temp directories without leaving open WAL/SHM handles.
+  app.addHook('onClose', async (_instance) => {
+    rawDb.close();
+  });
+
+  // Register auth decorator — must come before any route that uses authenticate
+  registerAuth(app);
+
+  // Rate limiting — global:false means per-route opt-in only (join uses it)
+  await app.register(rateLimit, { global: false });
 
   const storage = new FilesystemStorage(config.dataDir, config.maxBlobBytes);
 
   await app.register(healthRoutes);
   await app.register(blobRoutes, { storage });
+  await app.register(joinRoutes);
+  await app.register(changesRoutes);
+  await app.register(pushRoutes, { storage });
 
   // Safety net: any /api/blob/* path that reaches the not-found handler returns 400,
   // so path traversal attempts are never silently 404'd.

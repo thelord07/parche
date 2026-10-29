@@ -10,6 +10,10 @@ Es la parte **premium/privada** del ecosistema chamba. `package.json` tiene `"pr
 
 - Node 22 LTS, TypeScript 5.6, ESM
 - Fastify 5 (HTTP server, `inject()` para tests)
+- @chamba/core ^1.7.0 (schemas compartidos, `can()`, `isSyncable()`, `pathKey()`, `PROTOCOL_VERSION`)
+- better-sqlite3 v11 (síncrono, WAL mode — usa prebuild-install, no requiere node-gyp)
+- drizzle-orm (transacciones síncronas)
+- @fastify/rate-limit ^11 (compatible con Fastify 5 vía fastify-plugin v6; `global:false` = opt-in por ruta)
 - zod 3 (validación de env vars)
 - pnpm (gestor de paquetes, standalone — no es parte del workspace de chamba)
 - vitest 2 (tests co-ubicados)
@@ -55,26 +59,76 @@ Igual que `chamba/CLAUDE.md`:
 ```
 src/
   main.ts             # entrypoint — loadConfig → buildServer → listen
-  server.ts           # buildServer(config) → FastifyInstance
+  server.ts           # buildServer(config, logStream?) → FastifyInstance
   config.ts           # zod env schema + loadConfig + ConfigError
   version.ts          # VERSION leído de package.json
-  test-helpers.ts     # makeTempDataDir, makeApp, makeConfig, cleanupDir
+  test-helpers.ts     # makeTempDataDir, makeApp, makeConfig, cleanupDir, seedGroupWithDevice
+  no-destructive.test.ts  # verifica que no hay DELETE/db.delete/Map.delete en código de dominio
+  no-schema-dup.test.ts   # verifica que no se redefinen schemas de @chamba/core
+  auth/
+    plugin.ts         # registerAuth, authenticate preHandler, requireCan(action), RequestAuth
+    plugin.test.ts    # tests AC5 de autenticación
+    logging.test.ts   # verifica redacción de tokens en logs pino
+    tokens.ts         # generateDeviceToken, hashToken, generateInviteCode, etc.
+  admin/
+    commands.ts       # createGroup, createInvite, listMembers, revokeDevice, revokeInvite, createDevice
+    cli.ts            # entrypoint del admin CLI
+  db/
+    client.ts         # openDb → { db: AppDb, raw: RawDb }
+    migrate.ts        # runMigrations(rawDb)
+    schema.ts         # tablas drizzle: users, groups, members, devices, invites, files, changes, blobRefs
+    migrations/       # SQL migrations numeradas
   storage/
     storage-port.ts         # StoragePort interface + error classes
     blob-path.ts            # HASH_RE, isValidHash, blobPath
     filesystem-storage.ts   # FilesystemStorage implements StoragePort
   routes/
     health.ts          # GET /health
-    health.test.ts     # smoke test para /health
-    blobs.ts           # PUT/GET/HEAD /api/blob/:hash
+    health.test.ts
+    blobs.ts           # PUT/GET/HEAD /api/blob/:hash (auth requerida, scope por grupo)
+    blobs.test.ts
+    join.ts            # POST /api/join (rate-limited, sin auth)
+    join.test.ts
+    changes.ts         # GET /api/g/:slug/changes (auth + can('read'))
+    changes.test.ts
+    push.ts            # POST /api/g/:slug/push (auth + can('write'))
+    push.test.ts
 ```
+
+## Modelo de datos (8 tablas)
+
+| Tabla | Descripción |
+|---|---|
+| `users` | Cuentas de usuario |
+| `groups` | Grupos de sync (slug único, seq_counter) |
+| `members` | Membresía (role, removed_at) |
+| `devices` | Dispositivos autenticados (token_hash, revoked_at) |
+| `invites` | Códigos de invitación (code_hash, role, expires_at, max_uses, uses) |
+| `files` | Estado actual de archivos (head_hash, head_seq, path_key) |
+| `changes` | Log de cambios append-only (seq, path, hash) |
+| `blob_refs` | Scope de blobs por grupo (group_id, hash) |
+
+## Advertencia de seguridad
+
+**Revocación es siempre UPDATE, nunca DELETE.**
+
+- Tokens: `revoked_at` en `devices`
+- Membresía: `removed_at` en `members`
+- Archivos eliminados: tombstone `head_hash = null` en `files`
+
+Nada se borra físicamente de la base de datos. Esta regla no es negociable.
 
 ## Regla fundamental: parche nunca borra blobs ni historial
 
 **parche no tiene operación de borrado de blobs.** `StoragePort` no tiene método `delete`/`remove`/`erase`. `FilesystemStorage` solo limpia sus propios archivos temporales (bajo `<dataDir>/tmp/`) cuando ocurre un error durante un PUT; nunca toca los blobs almacenados.
 
-Esta regla no es negociable. Si necesitás agregar algo que parezca borrar, primero consultá.
+El archivo `src/no-destructive.test.ts` verifica automáticamente que no se introduzcan operaciones destructivas.
 
-## Advertencia de seguridad
+## Autenticación
 
-Los endpoints `/api/blob/*` **no tienen autenticación todavía**. No exponer el server públicamente hasta que se agregue auth (ticket futuro).
+- Bearer token `pch_<base62>` en header `Authorization`
+- El server guarda solo el SHA-256 del token (nunca el token plano)
+- `authenticate` preHandler: valida hash, revocación, membresía, y slug de grupo
+- `requireCan(action)` preHandler factory: usa `can()` de @chamba/core
+- `request.auth: RequestAuth` contiene `deviceId`, `userId`, `groupId`, `groupSlug`, `role`
+- Pino redacta `req.headers.authorization` y `res.body.deviceToken` en los logs

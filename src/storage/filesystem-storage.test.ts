@@ -210,7 +210,7 @@ describe('FilesystemStorage', () => {
     });
   });
 
-  // ---- AC10: unlink only targets tmp/ paths ---------------------------------
+  // ---- AC10: unlink only targets tmp/ paths (cleanupTmp is the only removal) --
   describe('AC10: unlink targets only tmp/ paths', () => {
     it('every unlink call targets a path under <dataDir>/tmp/', async () => {
       const tmpDir = join(dataDir, 'tmp');
@@ -241,6 +241,48 @@ describe('FilesystemStorage', () => {
       }
 
       vi.unmock('node:fs/promises');
+    });
+  });
+
+  // ---- AC14: 4 concurrent PUTs of the same new blob → exactly one created:true
+  describe('AC14: concurrent puts of the same blob', () => {
+    it('4 concurrent puts of the same new blob yield exactly one created:true', async () => {
+      const body = Buffer.from('concurrent blob content for link test');
+      const hash = sha256(body);
+
+      // Run 4 puts in parallel; link() is atomic — only one wins
+      const results = await Promise.all([
+        storage.put(hash, Buffer.from(body)),
+        storage.put(hash, Buffer.from(body)),
+        storage.put(hash, Buffer.from(body)),
+        storage.put(hash, Buffer.from(body)),
+      ]);
+
+      const createdCount = results.filter((r) => r.created).length;
+      const notCreatedCount = results.filter((r) => !r.created).length;
+
+      expect(createdCount).toBe(1);
+      expect(notCreatedCount).toBe(3);
+
+      // The blob must exist on disk
+      expect(await storage.has(hash)).toBe(true);
+    });
+
+    it('no tmp files remain after 4 concurrent puts', async () => {
+      const body = Buffer.from('concurrent blob no-leftover check');
+      const hash = sha256(body);
+
+      await Promise.all([
+        storage.put(hash, Buffer.from(body)),
+        storage.put(hash, Buffer.from(body)),
+        storage.put(hash, Buffer.from(body)),
+        storage.put(hash, Buffer.from(body)),
+      ]);
+
+      // tmp/ directory should be empty (cleanupTmp ran for every winner and loser)
+      const tmpDir = join(dataDir, 'tmp');
+      const files = await listFiles(tmpDir).catch(() => [] as string[]);
+      expect(files).toHaveLength(0);
     });
   });
 });
