@@ -32,6 +32,11 @@ const envSchema = z.object({
     message:
       'PARCHE_TRUST_PROXY must be empty or a comma-separated list of IP addresses / CIDR blocks',
   }),
+  // New in PARCHE-006
+  PARCHE_PUBLIC_URL: z.string().url().optional(),
+  PARCHE_SMTP_URL: z.string().optional(),
+  PARCHE_MAIL_FROM: z.string().optional(),
+  PARCHE_CREATORS: z.string().optional().default(''),
 });
 
 export interface Config {
@@ -41,6 +46,12 @@ export interface Config {
   maxBlobBytes: number;
   logLevel: LogLevel;
   trustProxy: string;
+  // New in PARCHE-006
+  publicUrl: string | undefined;
+  smtpUrl: string | undefined;
+  mailFrom: string;
+  creators: string[];
+  isProduction: boolean;
 }
 
 export class ConfigError extends Error {
@@ -48,6 +59,30 @@ export class ConfigError extends Error {
   constructor(message: string) {
     super(message);
   }
+}
+
+/**
+ * Assert that the mailer is fully configured (SMTP URL present and valid scheme).
+ * In production PARCHE_PUBLIC_URL is required too: sign-in links are built from it
+ * (never from the Host header), so a missing value would mail links to localhost.
+ * Called from main.ts — the server will not start without it.
+ * The admin CLI does NOT call this.
+ */
+export function assertMailerConfigured(config: Config): string {
+  if (config.isProduction && !config.publicUrl) {
+    throw new ConfigError(
+      'PARCHE_PUBLIC_URL is required in production (sign-in links are built from it).',
+    );
+  }
+  if (!config.smtpUrl) {
+    throw new ConfigError(
+      'PARCHE_SMTP_URL is required to start the server. Set it to an smtp:// or smtps:// URL.',
+    );
+  }
+  if (!config.smtpUrl.startsWith('smtp://') && !config.smtpUrl.startsWith('smtps://')) {
+    throw new ConfigError('PARCHE_SMTP_URL must start with smtp:// or smtps://');
+  }
+  return config.smtpUrl;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -62,6 +97,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new ConfigError(`invalid parche configuration: ${messages}`);
   }
   const data = result.data;
+
+  // Derive mailFrom: either explicit or parche@<host of publicUrl>
+  let mailFrom = data.PARCHE_MAIL_FROM;
+  if (!mailFrom && data.PARCHE_PUBLIC_URL) {
+    try {
+      const host = new URL(data.PARCHE_PUBLIC_URL).hostname;
+      mailFrom = `parche@${host}`;
+    } catch {
+      mailFrom = 'parche@localhost';
+    }
+  }
+  if (!mailFrom) mailFrom = 'parche@localhost';
+
+  // Normalize creators: split by comma, trim, lowercase, filter empty
+  const creators = data.PARCHE_CREATORS.split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.length > 0);
+
   return {
     port: data.PORT,
     host: data.HOST,
@@ -69,5 +122,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxBlobBytes: data.PARCHE_MAX_BLOB_BYTES,
     logLevel: data.PARCHE_LOG_LEVEL,
     trustProxy: data.PARCHE_TRUST_PROXY,
+    publicUrl: data.PARCHE_PUBLIC_URL,
+    smtpUrl: data.PARCHE_SMTP_URL,
+    mailFrom,
+    creators,
+    isProduction: env.NODE_ENV === 'production',
   };
 }

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, type WriteStream } from 'node:fs';
 import { link, mkdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pipeline as pipelineCallback, Readable, Writable } from 'node:stream';
@@ -48,11 +48,11 @@ export class FilesystemStorage implements StoragePort {
 
     let bytesWritten = 0;
     let digest = '';
+    const fileStream = createWriteStream(tmpPath);
 
     try {
       const hasher = createHash('sha256');
       const maxBytesRef = this.maxBytes;
-      const fileStream = createWriteStream(tmpPath);
       let accumulated = 0;
 
       await pipeline(
@@ -76,6 +76,9 @@ export class FilesystemStorage implements StoragePort {
       digest = hasher.digest('hex');
       bytesWritten = accumulated;
     } catch (err) {
+      // Close the tmp stream first: its open() is async, so unlinking before it
+      // settles would let the late open recreate the file (and leak the fd).
+      await closeStream(fileStream);
       // Clean up own temp file on any error via the single allowed removal.
       await cleanupTmp(tmpPath);
       throw err;
@@ -172,6 +175,20 @@ export class FilesystemStorage implements StoragePort {
       throw new HashMismatchError(hash);
     }
   }
+}
+
+/** Destroy a write stream and resolve once its file descriptor is closed. */
+function closeStream(stream: WriteStream): Promise<void> {
+  return new Promise((resolve) => {
+    if (stream.closed) {
+      resolve();
+      return;
+    }
+    // pipeline() already surfaced the real error; ignore any late one from destroy().
+    stream.on('error', () => {});
+    stream.once('close', () => resolve());
+    stream.destroy();
+  });
 }
 
 /**

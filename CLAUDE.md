@@ -26,12 +26,14 @@ Es la parte **premium/privada** del ecosistema chamba. `package.json` tiene `"pr
 ```bash
 pnpm install          # instalar dependencias
 pnpm dev              # tsx watch src/main.ts
-pnpm build            # tsc --noEmit + tsup
+pnpm dev:web          # vite dev server (SPA, proxy → :8787)
+pnpm build            # typecheck + vite build + tsup (genera dist/ completo)
+pnpm build:web        # solo el frontend (genera web/dist/)
 pnpm start            # node dist/main.js
 pnpm test             # vitest run
 pnpm lint             # biome check .
 pnpm lint:write       # biome check --write .
-pnpm typecheck        # tsc --noEmit
+pnpm typecheck        # tsc --noEmit + tsc -p web/tsconfig.json --noEmit
 ```
 
 ## Convenciones de código
@@ -95,9 +97,23 @@ src/
     changes.test.ts
     push.ts                     # POST /api/g/:slug/push (auth + can('write'))
     push.test.ts
+web/                # SPA React (Vite, TypeScript, react-router-dom v6)
+  index.html
+  vite.config.ts
+  tsconfig.json
+  vitest.setup.ts
+  src/
+    main.tsx        # entrypoint React
+    app.tsx         # rutas
+    theme.css       # design tokens + fuentes (@fontsource)
+    api.ts          # cliente fetch tipado
+    components/     # logo, header, button, field, copyable, code-block
+    lib/            # slug.ts
+    pages/          # entrar, auth-token, inicio, nuevo, invitar, unirse
 Dockerfile          # multi-stage, node:22-bookworm-slim, USER node, HEALTHCHECK via fetch
 .dockerignore
-docker-compose.yml  # servicio parche, loopback-only port, red con subred fija
+docker-compose.yml       # servicio parche, loopback-only port, red con subred fija
+docker-compose.dev.yml   # mailpit (SMTP dev + UI :8025)
 deploy/
   nginx/
     parche.chamba.tools.conf  # ejemplo para sites-available

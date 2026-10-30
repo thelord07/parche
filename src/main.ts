@@ -1,10 +1,13 @@
-import { ConfigError, loadConfig } from './config.js';
+import nodemailer from 'nodemailer';
+import { assertMailerConfigured, ConfigError, loadConfig } from './config.js';
 import { buildServer } from './server.js';
 
 async function main(): Promise<void> {
   let config: ReturnType<typeof loadConfig>;
+  let smtpUrl: string;
   try {
     config = loadConfig();
+    smtpUrl = assertMailerConfigured(config);
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(err.message);
@@ -13,7 +16,9 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  const app = await buildServer(config);
+  const transport = nodemailer.createTransport(smtpUrl);
+
+  const app = await buildServer(config, { transport });
 
   const stop = async (): Promise<void> => {
     await app.close();

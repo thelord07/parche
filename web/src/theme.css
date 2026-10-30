@@ -1,0 +1,172 @@
+@import "@fontsource/space-grotesk/400.css";
+@import "@fontsource/space-grotesk/500.css";
+@import "@fontsource/space-grotesk/600.css";
+@import "@fontsource/instrument-sans/400.css";
+@import "@fontsource/instrument-sans/500.css";
+@import "@fontsource/instrument-sans/600.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+:root {
+  --bg: oklch(0.165 0.012 66);
+  --bg2: oklch(0.205 0.014 66);
+  --card: oklch(0.225 0.015 66);
+  --border: oklch(0.315 0.016 66);
+  --text: oklch(0.95 0.008 82);
+  --muted: oklch(0.705 0.014 78);
+  --ok: oklch(0.77 0.11 165);
+  --warn: oklch(0.83 0.11 88);
+  --accent: #d97a4f;
+  /* Derived: change --accent once and both hover tints follow */
+  --accent-hover: color-mix(in srgb, var(--accent) 87%, white);
+  --accent-link-hover: color-mix(in srgb, var(--accent) 80%, white);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Instrument Sans", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--text);
+}
+
+a:hover {
+  color: var(--accent-link-hover);
+}
+
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+input::placeholder {
+  color: var(--muted);
+}
+
+/* ─── Responsive: invite table ─────────────────────────────────────────────── */
+
+/* Desktop table: shown above 640 px, hidden below */
+.invite-table-desktop {
+  display: block;
+}
+
+/* Mobile card list: hidden above 640 px, shown below */
+.invite-list-mobile {
+  display: none;
+}
+
+/* Mobile card row */
+.invite-mobile-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.invite-mobile-row:last-child {
+  border-bottom: 0;
+}
+
+.invite-mobile-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+@media (max-width: 639px) {
+  .invite-table-desktop {
+    display: none;
+  }
+
+  .invite-list-mobile {
+    display: block;
+  }
+}
+
+/* ─── Responsive: CodeBlock ─────────────────────────────────────────────────── */
+
+.code-block {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+  overflow: hidden;
+}
+
+.code-block code {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  height: 48px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.code-block button {
+  flex: none;
+  border: 0;
+  border-left: 1px solid var(--border);
+}
+
+/* The invite link row reuses the code-block shell with a smaller, quieter line. */
+.code-block.link-row code {
+  height: 40px;
+  font-size: 13px;
+}
+
+.code-block button.code-block-btn-primary {
+  border-left-color: var(--accent);
+}
+
+@media (max-width: 639px) {
+  .code-block {
+    flex-direction: column;
+  }
+
+  .code-block code,
+  .code-block.link-row code {
+    height: auto;
+    padding: 14px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow-x: visible;
+    line-height: 1.5;
+  }
+
+  .code-block button {
+    width: 100%;
+    justify-content: center;
+    height: 48px;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .code-block button.code-block-btn-primary {
+    border-top-color: var(--accent);
+  }
+}

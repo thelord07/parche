@@ -5,9 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { generateDeviceToken, hashInviteCode, hashToken } from '../auth/tokens.js';
 import { devices, groups, invites, members, users } from '../db/schema.js';
 import { newId } from '../ids.js';
-
-// Rate limit for the /api/join endpoint — hard-coded constant, no env override.
-const JOIN_RATE_LIMIT = { max: 10, timeWindow: '1 minute' } as const;
+import { inviteCodeRateLimit } from './invite-rate-limit.js';
 
 // Sentinel type returned by the transaction to avoid calling reply inside it
 type JoinTxResult = { kind: 'ok'; body: JoinResponse } | { kind: '404' } | { kind: '409' };
@@ -16,9 +14,7 @@ export async function joinRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/api/join',
     {
-      config: {
-        rateLimit: JOIN_RATE_LIMIT,
-      },
+      preHandler: [inviteCodeRateLimit],
     },
     async (request, reply) => {
       // Validate body with core schema

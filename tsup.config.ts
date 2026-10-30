@@ -1,4 +1,4 @@
-import { cp } from 'node:fs/promises';
+import { access, cp } from 'node:fs/promises';
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
@@ -12,17 +12,22 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   shims: false,
-  // better-sqlite3 is a native CJS module — must stay external so tsup does not attempt
-  // to bundle the binding, which would break at runtime.
   external: ['better-sqlite3'],
   async onSuccess() {
-    // Copy versionned migration SQL files alongside the bundle so that
-    // fileURLToPath(new URL('./migrations', import.meta.url)) resolves correctly
-    // from dist/main.js and dist/admin-cli.js at runtime.
+    // Copy migration files
     try {
       await cp('src/db/migrations', 'dist/migrations', { recursive: true });
     } catch {
-      // Migrations directory may not exist yet during first bootstrapping
+      // Migrations directory may not exist yet
     }
+
+    // Copy SPA build — fail loudly if missing
+    try {
+      await access('web/dist');
+    } catch {
+      console.error('[tsup] ERROR: web/dist is missing. Run "pnpm run build:web" first.');
+      process.exit(1);
+    }
+    await cp('web/dist', 'dist/web', { recursive: true });
   },
 });

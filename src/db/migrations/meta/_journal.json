@@ -8,6 +8,13 @@
       "when": 1793238917578,
       "tag": "0000_mute_cassandra_nova",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1793238917579,
+      "tag": "0001_add_sessions_magic_links_code_hint",
+      "breakpoints": true
     }
   ]
 }

@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadConfig } from './config.js';
+import { assertMailerConfigured, ConfigError, loadConfig } from './config.js';
 
 const WORKTREE_ROOT = resolve(new URL('.', import.meta.url).pathname, '..');
 
@@ -105,6 +105,164 @@ describe('loadConfig', () => {
       expect(err).toBeInstanceOf(ConfigError);
       expect((err as ConfigError).message).toMatch(/PARCHE_TRUST_PROXY/);
     }
+  });
+});
+
+describe('new PARCHE-006 config fields', () => {
+  it('PARCHE_PUBLIC_URL is optional — loadConfig does not throw without it', () => {
+    expect(() => loadConfig({})).not.toThrow();
+    const cfg = loadConfig({});
+    expect(cfg.publicUrl).toBeUndefined();
+  });
+
+  it('PARCHE_SMTP_URL is optional in loadConfig', () => {
+    const cfg = loadConfig({});
+    expect(cfg.smtpUrl).toBeUndefined();
+  });
+
+  it('PARCHE_CREATORS is normalized to lowercase and split', () => {
+    const cfg = loadConfig({ PARCHE_CREATORS: '  Alice@Example.com , bob@test.com , ' });
+    expect(cfg.creators).toEqual(['alice@example.com', 'bob@test.com']);
+  });
+
+  it('isCreator uses lowercase match', () => {
+    const cfg = loadConfig({ PARCHE_CREATORS: 'Owner@Example.com' });
+    expect(cfg.creators).toContain('owner@example.com');
+    expect(cfg.creators).not.toContain('Owner@Example.com');
+  });
+
+  it('isProduction is true when NODE_ENV=production', () => {
+    const cfg = loadConfig({ NODE_ENV: 'production' });
+    expect(cfg.isProduction).toBe(true);
+  });
+
+  it('isProduction is false when NODE_ENV is unset or development', () => {
+    const cfg1 = loadConfig({});
+    expect(cfg1.isProduction).toBe(false);
+    const cfg2 = loadConfig({ NODE_ENV: 'development' });
+    expect(cfg2.isProduction).toBe(false);
+  });
+
+  it('mailFrom defaults to parche@<host of PARCHE_PUBLIC_URL>', () => {
+    const cfg = loadConfig({ PARCHE_PUBLIC_URL: 'https://parche.example.com' });
+    expect(cfg.mailFrom).toBe('parche@parche.example.com');
+  });
+
+  it('mailFrom uses explicit PARCHE_MAIL_FROM when set', () => {
+    const cfg = loadConfig({
+      PARCHE_PUBLIC_URL: 'https://parche.example.com',
+      PARCHE_MAIL_FROM: 'noreply@custom.com',
+    });
+    expect(cfg.mailFrom).toBe('noreply@custom.com');
+  });
+});
+
+describe('assertMailerConfigured (AC11)', () => {
+  it('throws ConfigError naming PARCHE_SMTP_URL when smtpUrl is absent — production', () => {
+    const cfg = loadConfig({ NODE_ENV: 'production', PARCHE_PUBLIC_URL: 'https://example.com' });
+    expect(() => assertMailerConfigured(cfg)).toThrow(ConfigError);
+    try {
+      assertMailerConfigured(cfg);
+    } catch (err) {
+      expect((err as ConfigError).message).toMatch(/PARCHE_SMTP_URL/);
+    }
+  });
+
+  it('throws ConfigError naming PARCHE_SMTP_URL when smtpUrl is absent — dev/unset NODE_ENV', () => {
+    const cfg = loadConfig({});
+    expect(() => assertMailerConfigured(cfg)).toThrow(ConfigError);
+    try {
+      assertMailerConfigured(cfg);
+    } catch (err) {
+      expect((err as ConfigError).message).toMatch(/PARCHE_SMTP_URL/);
+    }
+  });
+
+  it('throws ConfigError when smtpUrl does not start with smtp:// or smtps://', () => {
+    const cfg = loadConfig({ PARCHE_SMTP_URL: 'http://localhost:1025' });
+    expect(() => assertMailerConfigured(cfg)).toThrow(ConfigError);
+  });
+
+  it('does NOT throw when smtpUrl starts with smtp://', () => {
+    const cfg = loadConfig({ PARCHE_SMTP_URL: 'smtp://localhost:1025' });
+    expect(() => assertMailerConfigured(cfg)).not.toThrow();
+  });
+
+  it('throws ConfigError naming PARCHE_PUBLIC_URL in production without it, even with SMTP', () => {
+    const cfg = loadConfig({ NODE_ENV: 'production', PARCHE_SMTP_URL: 'smtps://u:p@host:465' });
+    expect(() => assertMailerConfigured(cfg)).toThrow(/PARCHE_PUBLIC_URL/);
+  });
+
+  it('does NOT require PARCHE_PUBLIC_URL outside production', () => {
+    const cfg = loadConfig({ PARCHE_SMTP_URL: 'smtp://127.0.0.1:1025' });
+    expect(assertMailerConfigured(cfg)).toBe('smtp://127.0.0.1:1025');
+  });
+
+  it('does NOT throw when smtpUrl starts with smtps://', () => {
+    const cfg = loadConfig({ PARCHE_SMTP_URL: 'smtps://user:pass@host:465' });
+    expect(() => assertMailerConfigured(cfg)).not.toThrow();
+  });
+});
+
+describe('AC11 integration — spawnSync without SMTP', () => {
+  it('main.ts exits non-zero naming PARCHE_SMTP_URL when NODE_ENV=production', () => {
+    const env = { ...process.env };
+    delete env.PARCHE_SMTP_URL;
+    const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
+      cwd: WORKTREE_ROOT,
+      env: {
+        ...env,
+        NODE_ENV: 'production',
+        PARCHE_PUBLIC_URL: 'https://parche.example.com',
+        PARCHE_CREATORS: 'test@example.com',
+      },
+      encoding: 'utf8',
+      timeout: 10000,
+    });
+    expect(result.status).not.toBe(0);
+    const output = (result.stderr ?? '') + (result.stdout ?? '');
+    expect(output).toMatch(/PARCHE_SMTP_URL/);
+  });
+
+  it('main.ts exits non-zero naming PARCHE_SMTP_URL when NODE_ENV is unset', () => {
+    const env = { ...process.env };
+    delete env.NODE_ENV;
+    delete env.PARCHE_SMTP_URL;
+    const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
+      cwd: WORKTREE_ROOT,
+      env: {
+        ...env,
+        PARCHE_PUBLIC_URL: 'https://parche.example.com',
+        PARCHE_CREATORS: 'test@example.com',
+      },
+      encoding: 'utf8',
+      timeout: 10000,
+    });
+    expect(result.status).not.toBe(0);
+    const output = (result.stderr ?? '') + (result.stdout ?? '');
+    expect(output).toMatch(/PARCHE_SMTP_URL/);
+  });
+
+  it('admin CLI (backup-db) exits 0 without PARCHE_SMTP_URL', async () => {
+    const { mkdtemp, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const tmp = await mkdtemp(join(tmpdir(), 'parche-ac11-'));
+    const dest = join(tmp, 'backup.db');
+    const env: NodeJS.ProcessEnv = { ...process.env, PARCHE_DATA_DIR: tmp };
+    delete env.PARCHE_SMTP_URL;
+    const result = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', 'src/admin/cli.ts', 'backup-db', dest],
+      {
+        cwd: WORKTREE_ROOT,
+        env,
+        encoding: 'utf8',
+        timeout: 15000,
+      },
+    );
+    await rm(tmp, { recursive: true, force: true });
+    expect(result.status).toBe(0);
   });
 });
 

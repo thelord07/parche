@@ -1,17 +1,26 @@
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import fastifyCookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
+import staticPlugin from '@fastify/static';
 import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import Fastify from 'fastify';
+import type { Transporter } from 'nodemailer';
 import { registerAuth } from './auth/plugin.js';
 import type { Config } from './config.js';
 import type { AppDb, RawDb } from './db/client.js';
 import { openDb } from './db/client.js';
 import { runMigrations } from './db/migrate.js';
+import { createMailer } from './mail/mailer.js';
 import { blobRoutes } from './routes/blobs.js';
 import { changesRoutes } from './routes/changes.js';
 import { healthRoutes } from './routes/health.js';
 import { joinRoutes } from './routes/join.js';
 import { pushRoutes } from './routes/push.js';
-import { FilesystemStorage } from './storage/filesystem-storage.js';
+import { webAuthRoutes } from './routes/web/auth.js';
+import { webGroupsRoutes } from './routes/web/groups.js';
+import { webInviteCheckRoutes } from './routes/web/invite-check.js';
+import { webInvitesRoutes } from './routes/web/invites.js';
 
 // ---------------------------------------------------------------------------
 // Fastify instance decoration typings
@@ -24,10 +33,29 @@ declare module 'fastify' {
   }
 }
 
+export interface BuildServerOptions {
+  /** Nodemailer transporter — injected so tests can use in-memory transport */
+  transport?: Transporter;
+  /** Optional log stream for capturing pino output in tests */
+  logStream?: NodeJS.WritableStream;
+  /**
+   * In tests, callers can hook into background work from the auth route.
+   * Fire-and-forget in production.
+   */
+  onBackgroundWork?: (p: Promise<void>) => void;
+  /**
+   * Override the web static files directory (for tests using a fixture).
+   * If not set, defaults to `<bundle>/web` (dist/web in prod, omitted if missing).
+   */
+  webDir?: string;
+}
+
 export async function buildServer(
   config: Config,
-  logStream?: NodeJS.WritableStream,
+  opts: BuildServerOptions = {},
 ): Promise<FastifyInstance> {
+  const { transport, logStream, onBackgroundWork, webDir } = opts;
+
   const loggerOpts =
     config.logLevel === 'silent'
       ? false
@@ -61,13 +89,21 @@ export async function buildServer(
     rawDb.close();
   });
 
+  // Decorate request with webUser (null by default; set by requireWebSession)
+  app.decorateRequest('webUser', null);
+
+  // Register cookie plugin (needed for web session)
+  await app.register(fastifyCookie);
+
   // Register auth decorator — must come before any route that uses authenticate
   registerAuth(app);
 
   // Rate limiting — global:false means per-route opt-in only (join uses it)
   await app.register(rateLimit, { global: false });
 
-  const storage = new FilesystemStorage(config.dataDir, config.maxBlobBytes);
+  const storage = await import('./storage/filesystem-storage.js').then(
+    (m) => new m.FilesystemStorage(config.dataDir, config.maxBlobBytes),
+  );
 
   await app.register(healthRoutes);
   await app.register(blobRoutes, { storage });
@@ -75,28 +111,73 @@ export async function buildServer(
   await app.register(changesRoutes);
   await app.register(pushRoutes);
 
-  // Safety net: any /api/blob/* path that reaches the not-found handler returns 400,
-  // so path traversal attempts are never silently 404'd.
-  //
-  // Why both request.url and request.raw.url are checked:
-  //   - request.url is the URL after Fastify/find-my-way normalises it for routing.
-  //     For a real-HTTP request with path `/api/blob/../etc/passwd`, find-my-way
-  //     resolves the traversal to `/api/etc/passwd`, so request.url loses the
-  //     `/api/blob/` prefix and the first check alone would not catch it.
-  //   - request.raw.url is Node.js's IncomingMessage.url — the raw bytes exactly as
-  //     received over the TCP socket, NEVER normalised by Node.js itself.
-  //     For the same traversal path it still starts with `/api/blob/`, so the second
-  //     check catches it and correctly returns 400.
-  //
-  // In inject() mode (light-my-request), raw.url IS normalised before the fake
-  // IncomingMessage is created, so both checks see `/api/etc/passwd` and the
-  // handler returns 404 for the traversal path. The real-HTTP test in
-  // src/routes/blobs.test.ts is the authoritative proof of 400 over the wire.
+  // -------------------------------------------------------------------------
+  // Web (SPA) routes — mailer required
+  // -------------------------------------------------------------------------
+  if (transport) {
+    const publicUrl = config.publicUrl ?? 'http://localhost:8787';
+    const mailer = createMailer(transport, {
+      from: config.mailFrom,
+      publicUrl,
+    });
+
+    await app.register(webAuthRoutes, { mailer, config, onBackgroundWork });
+    await app.register(webGroupsRoutes, { config });
+    await app.register(webInvitesRoutes);
+    await app.register(webInviteCheckRoutes);
+  }
+
+  // -------------------------------------------------------------------------
+  // Static file serving (SPA)
+  // Determine the web directory: explicit (tests), dist/web (prod), or absent (dev).
+  // -------------------------------------------------------------------------
+  const resolvedWebDir =
+    webDir ??
+    (() => {
+      // In prod: dist/web (next to dist/main.js)
+      const prodDir = fileURLToPath(new URL('./web', import.meta.url));
+      return prodDir;
+    })();
+
+  const webDirExists = existsSync(resolvedWebDir);
+
+  if (webDirExists) {
+    await app.register(staticPlugin, {
+      root: resolvedWebDir,
+      wildcard: false,
+      index: 'index.html',
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Not-found handler — must come after all routes + static
+  // -------------------------------------------------------------------------
   app.setNotFoundHandler((request, reply) => {
     const rawUrl = request.raw.url ?? request.url;
+
+    // Safety net: traversal attempts on /api/blob/* → 400
     if (request.url.startsWith('/api/blob/') || rawUrl.startsWith('/api/blob/')) {
       return reply.status(400).send({ error: 'invalid hash' });
     }
+
+    // Any /api/* path that wasn't matched → 404 JSON
+    if (request.url.startsWith('/api/')) {
+      return reply.status(404).send({ error: 'not found' });
+    }
+
+    // SPA fallback: GET requests that accept HTML
+    if (request.method === 'GET' && webDirExists) {
+      const accept = request.headers.accept ?? '';
+      if (accept.includes('text/html') || accept.includes('*/*')) {
+        // Add Referrer-Policy for sensitive routes
+        const url = request.url;
+        if (url.startsWith('/auth/') || url.startsWith('/j/')) {
+          void reply.header('Referrer-Policy', 'no-referrer');
+        }
+        return reply.sendFile('index.html');
+      }
+    }
+
     return reply.status(404).send({ error: 'not found' });
   });
 

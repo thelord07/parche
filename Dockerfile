@@ -19,8 +19,9 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 # Copy source and config files
 COPY src ./src
+COPY web ./web
 COPY tsconfig.json tsup.config.ts drizzle.config.ts biome.json ./
-# Build: tsc typecheck + tsup bundle + copies migrations to dist/
+# Build: typecheck + vite SPA build + tsup bundle + copies migrations/web to dist/
 RUN pnpm build
 
 # ---- prod-deps ----
