@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanupDir, makeApp, makeTempDataDir } from '../test-helpers.js';
@@ -13,7 +13,22 @@ const EXPECTED_TABLES = [
   'files',
   'changes',
   'blob_refs',
+  'sessions',
+  'magic_links',
 ];
+
+describe('migration files are additive-only', () => {
+  it('no migration file contains DROP TABLE, DROP COLUMN, or DELETE FROM', () => {
+    const migrationsDir = join(import.meta.dirname, 'migrations');
+    const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql'));
+    for (const file of files) {
+      const sql = readFileSync(join(migrationsDir, file), 'utf-8').toUpperCase();
+      expect(sql, `${file} must not contain DROP TABLE`).not.toMatch(/DROP\s+TABLE/);
+      expect(sql, `${file} must not contain DROP COLUMN`).not.toMatch(/DROP\s+COLUMN/);
+      expect(sql, `${file} must not contain DELETE FROM`).not.toMatch(/DELETE\s+FROM/);
+    }
+  });
+});
 
 describe('DB migrations', () => {
   let dataDir: string;

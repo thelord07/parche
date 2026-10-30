@@ -121,6 +121,50 @@ describe('FilesystemStorage', () => {
     });
   });
 
+  // ---- oversize error before the tmp file finished opening -----------------
+  describe('tmp cleanup when the limit trips before the write stream opens', () => {
+    it('leaves no tmp file behind, even after the late open would have landed', async () => {
+      const smallStorage = new FilesystemStorage(dataDir, 5);
+      const oversizedBuf = Buffer.from('hello world!'); // 12 bytes > 5, in ONE chunk
+      const hash = sha256(oversizedBuf);
+
+      for (let i = 0; i < 20; i++) {
+        // A single oversized chunk makes the size check fail on the very first write,
+        // typically before createWriteStream has opened the tmp file.
+        await expect(smallStorage.put(hash, Readable.from([oversizedBuf]))).rejects.toThrow(
+          BlobTooLargeError,
+        );
+      }
+      // Give any still-pending open() time to create its file.
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+
+      expect(await listFiles(dataDir)).toEqual([]);
+    });
+
+    it('closes the tmp write stream on error (no file descriptor leak)', async () => {
+      const smallStorage = new FilesystemStorage(dataDir, 5);
+      const oversizedBuf = Buffer.from('hello world!');
+      const hash = sha256(oversizedBuf);
+      const openFds = async () => (await readdir('/dev/fd')).length;
+
+      // Warm up once so lazily-opened handles (tmp dir, etc.) are not counted.
+      await expect(smallStorage.put(hash, Readable.from([oversizedBuf]))).rejects.toThrow(
+        BlobTooLargeError,
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      const before = await openFds();
+
+      for (let i = 0; i < 20; i++) {
+        await expect(smallStorage.put(hash, Readable.from([oversizedBuf]))).rejects.toThrow(
+          BlobTooLargeError,
+        );
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+      expect(await openFds()).toBe(before);
+    });
+  });
+
   // ---- get / has / size present / absent ------------------------------------
   describe('get / has / size', () => {
     it('get returns a readable stream for existing blob', async () => {

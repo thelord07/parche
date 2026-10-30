@@ -112,6 +112,16 @@ async function listBlobFiles(dataDir: string): Promise<string[]> {
   });
 }
 
+/** Polls until no blob/tmp files remain (up to ~1 s) and returns what is left. */
+async function waitForNoBlobFiles(dataDir: string): Promise<string[]> {
+  let files = await listBlobFiles(dataDir);
+  for (let i = 0; i < 20 && files.length > 0; i++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    files = await listBlobFiles(dataDir);
+  }
+  return files;
+}
+
 describe('blob routes', () => {
   let dataDir: string;
   let app: FastifyInstance;
@@ -660,9 +670,10 @@ describe('blob routes', () => {
         );
 
         expect(status).toBe(413);
-        // No files should remain after the oversize rejection.
-        const blobFiles = await listBlobFiles(dataDir);
-        expect(blobFiles).toHaveLength(0);
+        // No files should remain after the oversize rejection. The 413 is sent while
+        // the storage is still removing its tmp file, so wait for that cleanup to land
+        // instead of racing it (under a loaded test run the listing could run first).
+        expect(await waitForNoBlobFiles(dataDir)).toEqual([]);
       } finally {
         await realSmallApp.close();
       }

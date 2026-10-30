@@ -9,6 +9,22 @@ export function generateDeviceToken(): string {
 }
 
 /**
+ * Generate a magic link token: 32 random bytes as hex.
+ * Never stored plain — only the sha256 hash goes to the DB.
+ */
+export function generateMagicToken(): string {
+  return randomBytes(32).toString('hex');
+}
+
+/**
+ * Generate a session secret: 32 random bytes as base64url.
+ * The secret is the cookie value; only its sha256 goes to the DB.
+ */
+export function generateSessionSecret(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+/**
  * SHA-256 hex digest of a token (or any string).
  * Only the hash is stored in the database.
  */

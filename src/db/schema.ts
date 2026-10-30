@@ -81,6 +81,7 @@ export const devices = sqliteTable('devices', {
 
 // ---------------------------------------------------------------------------
 // invites — only code_hash is stored, never the plain code
+// code_hint: first 4 chars of the plain code for display (XXXX-••••)
 // ---------------------------------------------------------------------------
 
 export const invites = sqliteTable('invites', {
@@ -89,6 +90,7 @@ export const invites = sqliteTable('invites', {
     .notNull()
     .references(() => groups.id),
   codeHash: text('code_hash').notNull().unique(),
+  codeHint: text('code_hint'),
   role: text('role').notNull(),
   createdBy: text('created_by')
     .notNull()
@@ -149,6 +151,36 @@ export const changes = sqliteTable(
     check('changes_seq_check', sql`${t.seq} >= 1`),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// sessions — web session (cookie parche_session); only token_hash stored
+// ---------------------------------------------------------------------------
+
+export const sessions = sqliteTable('sessions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id),
+  tokenHash: text('token_hash').notNull().unique(),
+  createdAt: text('created_at').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  revokedAt: text('revoked_at'),
+  lastSeenAt: text('last_seen_at'),
+});
+
+// ---------------------------------------------------------------------------
+// magic_links — single-use auth tokens; only token_hash stored
+// ---------------------------------------------------------------------------
+
+export const magicLinks = sqliteTable('magic_links', {
+  id: text('id').primaryKey(),
+  email: text('email').notNull(),
+  tokenHash: text('token_hash').notNull().unique(),
+  createdAt: text('created_at').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  usedAt: text('used_at'),
+  ip: text('ip'),
+});
 
 // ---------------------------------------------------------------------------
 // blob_refs — tracks which group uploaded/uses each blob hash

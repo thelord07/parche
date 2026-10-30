@@ -14,6 +14,7 @@
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanupDir, makeApp, makeTempDataDir } from '../test-helpers.js';
+import { resetInviteRateLimit } from './invite-rate-limit.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -50,6 +51,7 @@ describe('Case A: trust proxy ON, distinct XFF IPs → no 429', () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
+    resetInviteRateLimit();
     dataDir = await makeTempDataDir();
     // Trust the inject socket address (127.0.0.1) so Fastify reads XFF
     app = await makeApp(dataDir, { trustProxy: '127.0.0.1' });
@@ -58,6 +60,7 @@ describe('Case A: trust proxy ON, distinct XFF IPs → no 429', () => {
   afterEach(async () => {
     await app.close();
     await cleanupDir(dataDir);
+    resetInviteRateLimit();
   });
 
   it('11 requests each with a different XFF IP all return non-429', async () => {
@@ -80,6 +83,7 @@ describe('Case B: trust proxy ON, same XFF IP → 11th gets 429', () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
+    resetInviteRateLimit();
     dataDir = await makeTempDataDir();
     app = await makeApp(dataDir, { trustProxy: '127.0.0.1' });
   });
@@ -87,6 +91,7 @@ describe('Case B: trust proxy ON, same XFF IP → 11th gets 429', () => {
   afterEach(async () => {
     await app.close();
     await cleanupDir(dataDir);
+    resetInviteRateLimit();
   });
 
   it('first 10 requests return non-429; 11th returns 429', async () => {
@@ -110,6 +115,7 @@ describe('Case C: trust proxy OFF, different XFF IPs are ignored → 11th gets 4
   let app: FastifyInstance;
 
   beforeEach(async () => {
+    resetInviteRateLimit();
     dataDir = await makeTempDataDir();
     // Default: trustProxy = '' (disabled)
     app = await makeApp(dataDir);
@@ -118,6 +124,7 @@ describe('Case C: trust proxy OFF, different XFF IPs are ignored → 11th gets 4
   afterEach(async () => {
     await app.close();
     await cleanupDir(dataDir);
+    resetInviteRateLimit();
   });
 
   it('first 10 requests return non-429; 11th returns 429 despite different XFF values', async () => {

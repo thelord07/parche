@@ -17,10 +17,16 @@
 
 ```bash
 cp .env.example .env
-# Edit .env as needed
+# Edit .env as needed (PARCHE_SMTP_URL is required to start the server)
 pnpm install
+docker compose -f docker-compose.dev.yml up -d   # Mailpit: SMTP 127.0.0.1:1025, inbox http://127.0.0.1:8025
 pnpm dev           # tsx watch — auto-restarts on change
+pnpm dev:web       # Vite dev server for the web app (proxies /api to :8787)
 ```
+
+The server never prints magic links: in development every sign-in email lands in
+the Mailpit inbox at http://127.0.0.1:8025 (`PARCHE_SMTP_URL=smtp://127.0.0.1:1025`).
+The admin CLI (`pnpm admin …`, `node dist/admin-cli.js …`) does **not** need SMTP.
 
 Or with the built output:
 
@@ -39,8 +45,41 @@ pnpm start
 | `PARCHE_MAX_BLOB_BYTES` | `20971520` | Maximum blob size (20 MiB) |
 | `PARCHE_LOG_LEVEL` | `info` | Pino log level: `fatal\|error\|warn\|info\|debug\|trace\|silent` |
 | `PARCHE_TRUST_PROXY` | `` (empty) | Comma-separated IPs/CIDRs to trust for `X-Forwarded-For` (see Deploy) |
+| `PARCHE_SMTP_URL` | — (**required** to start the server) | `smtp://` or `smtps://` URL used to send sign-in links. Dev: `smtp://127.0.0.1:1025` (Mailpit) |
+| `PARCHE_PUBLIC_URL` | — (**required in production**) | Public base URL (e.g. `https://parche.chamba.tools`); sign-in links are built from it, never from the `Host` header |
+| `PARCHE_MAIL_FROM` | `parche@<host of PARCHE_PUBLIC_URL>` | Sender address of sign-in emails |
+| `PARCHE_CREATORS` | `` (empty) | Comma-separated emails allowed to create parches from the web (case-insensitive) |
 
 Invalid values cause the process to exit with a non-zero code and a message naming the variable.
+
+## Web app
+
+The same server serves a small single-page app (Vite + React, source in `web/`,
+built into `dist/web`) on the same domain:
+
+| Route | What it does |
+|---|---|
+| `/entrar` | Ask for a sign-in link by email ("Revisa tu correo") |
+| `/auth` | Shows an **Entrar** button; the link is only consumed when it is pressed (mail scanners that open the link do not burn it) |
+| `/` | Your parches, or the empty state |
+| `/nuevo` | Create a parche (only emails in `PARCHE_CREATORS`) |
+| `/g/:slug/invitar` | Create invitations (the code is shown once), list them masked, revoke them |
+| `/j/:code` | Join instructions: the `npx @chamba/mcp@latest vault join <code>` command |
+
+**Magic link security**: the token is placed in the URL **fragment** (`/auth#<token>`),
+not in the path. Browsers never transmit fragments to the server, so the token never
+appears in Fastify's request logs or in nginx's `access.log`. The server only sees
+`GET /auth`; the SPA reads the fragment with `window.location.hash` and immediately
+calls `history.replaceState` to clear it from the address bar. This prevents the token
+from leaking via `Referer` headers, copy-paste, or browser history. The server also sets
+`Referrer-Policy: no-referrer` on `/auth` and `/j/*` as a defence-in-depth measure.
+
+The web API lives under `/api/web/*`: session cookie `parche_session` (HttpOnly,
+SameSite=Lax, Secure in production) and every mutation requires
+`Content-Type: application/json` plus the header `X-Parche-CSRF: 1`. Magic-link
+tokens, session secrets and invitation codes are stored hashed only and are never
+logged. Unknown `/api/*` paths keep answering `404` JSON; other GET paths fall back
+to the SPA.
 
 ## Data model
 
@@ -213,13 +252,16 @@ pnpm test
 
 Tests use `app.inject()` — no port binding required. Each test creates a fresh temporary `PARCHE_DATA_DIR`.
 
+Web UI tests (`web/**/*.test.tsx`) run in jsdom through `environmentMatchGlobs` in
+`vitest.config.ts`. When upgrading to Vitest 3, move that to `projects`.
+
 ## Lint and build
 
 ```bash
 pnpm lint          # biome check
 pnpm lint:write    # biome check --write (auto-fix)
 pnpm typecheck     # tsc --noEmit
-pnpm build         # typecheck + tsup
+pnpm build         # typecheck (server + web) + vite build + tsup
 ```
 
 ## Deploy

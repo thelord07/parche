@@ -4,12 +4,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createGroup, createInvite } from '../admin/commands.js';
 import { devices, invites, members } from '../db/schema.js';
 import { cleanupDir, makeApp, makeTempDataDir } from '../test-helpers.js';
+import { resetInviteRateLimit } from './invite-rate-limit.js';
 
 describe('POST /api/join', () => {
   let dataDir: string;
   let app: FastifyInstance;
 
   beforeEach(async () => {
+    resetInviteRateLimit();
     dataDir = await makeTempDataDir();
     app = await makeApp(dataDir);
   });
@@ -17,6 +19,7 @@ describe('POST /api/join', () => {
   afterEach(async () => {
     await app.close();
     await cleanupDir(dataDir);
+    resetInviteRateLimit();
   });
 
   function setupGroup(slug = 'test-group') {

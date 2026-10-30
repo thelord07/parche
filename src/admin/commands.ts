@@ -87,6 +87,41 @@ export function createGroup(db: AppDb, options: CreateGroupOptions): CreateGroup
 }
 
 // ---------------------------------------------------------------------------
+// create-group-for-user (web API — no device, user already exists)
+// ---------------------------------------------------------------------------
+
+export interface CreateGroupForUserOptions {
+  name: string;
+  slug: string;
+  userId: string;
+}
+
+export interface CreateGroupForUserResult {
+  groupId: string;
+}
+
+/**
+ * Create a group and make the given user its owner.
+ * Unlike createGroup, no device is created (the user is authenticated via the web session).
+ * Runs in a single transaction.
+ */
+export function createGroupForUser(
+  db: AppDb,
+  options: CreateGroupForUserOptions,
+): CreateGroupForUserResult {
+  const { name, slug, userId } = options;
+  const now = new Date().toISOString();
+  const groupId = newId();
+
+  db.transaction((tx) => {
+    tx.insert(groups).values({ id: groupId, slug, name, createdAt: now }).run();
+    tx.insert(members).values({ groupId, userId, role: 'owner', createdAt: now }).run();
+  });
+
+  return { groupId };
+}
+
+// ---------------------------------------------------------------------------
 // create-invite
 // ---------------------------------------------------------------------------
 

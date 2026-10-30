@@ -22,7 +22,7 @@ describe('auth logging redaction', () => {
       logOutput += chunk.toString();
     });
 
-    app = await buildServer({ ...makeConfig(dataDir), logLevel: 'info' }, logStream);
+    app = await buildServer({ ...makeConfig(dataDir), logLevel: 'info' }, { logStream });
 
     // Seed a group + invite so we can join
     createGroup(app.db, {
