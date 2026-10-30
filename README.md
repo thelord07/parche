@@ -60,11 +60,19 @@ built into `dist/web`) on the same domain:
 | Route | What it does |
 |---|---|
 | `/entrar` | Ask for a sign-in link by email ("Revisa tu correo") |
-| `/auth/:token` | Shows an **Entrar** button; the link is only consumed when it is pressed (mail scanners that open the link do not burn it) |
+| `/auth` | Shows an **Entrar** button; the link is only consumed when it is pressed (mail scanners that open the link do not burn it) |
 | `/` | Your parches, or the empty state |
 | `/nuevo` | Create a parche (only emails in `PARCHE_CREATORS`) |
 | `/g/:slug/invitar` | Create invitations (the code is shown once), list them masked, revoke them |
 | `/j/:code` | Join instructions: the `npx @chamba/mcp@latest vault join <code>` command |
+
+**Magic link security**: the token is placed in the URL **fragment** (`/auth#<token>`),
+not in the path. Browsers never transmit fragments to the server, so the token never
+appears in Fastify's request logs or in nginx's `access.log`. The server only sees
+`GET /auth`; the SPA reads the fragment with `window.location.hash` and immediately
+calls `history.replaceState` to clear it from the address bar. This prevents the token
+from leaking via `Referer` headers, copy-paste, or browser history. The server also sets
+`Referrer-Policy: no-referrer` on `/auth` and `/j/*` as a defence-in-depth measure.
 
 The web API lives under `/api/web/*`: session cookie `parche_session` (HttpOnly,
 SameSite=Lax, Secure in production) and every mutation requires

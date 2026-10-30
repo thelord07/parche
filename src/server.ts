@@ -171,7 +171,7 @@ export async function buildServer(
       if (accept.includes('text/html') || accept.includes('*/*')) {
         // Add Referrer-Policy for sensitive routes
         const url = request.url;
-        if (url.startsWith('/auth/') || url.startsWith('/j/')) {
+        if (url === '/auth' || url.startsWith('/auth/') || url.startsWith('/j/')) {
           void reply.header('Referrer-Policy', 'no-referrer');
         }
         return reply.sendFile('index.html');

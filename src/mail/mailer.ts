@@ -18,7 +18,7 @@ export function createMailer(transport: Transporter, options: MailerOptions): Ma
 
   return {
     async sendMagicLink({ to, token }) {
-      const url = `${publicUrl}/auth/${token}`;
+      const url = `${publicUrl}/auth#${token}`;
       const html = `<p>Haz click en el botón para entrar a parche:</p><p><a href="${url}">Entrar a parche</a></p><p>Este link vence en 15 minutos y solo se puede usar una vez.</p>`;
       const text = `Entra a parche: ${url}\n\nEste link vence en 15 minutos y solo se puede usar una vez.`;
 

@@ -1,14 +1,24 @@
-import { useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../api.ts';
 import { Header } from '../components/header.tsx';
 
-type State = 'idle' | 'verifying' | 'error';
+type State = 'idle' | 'verifying' | 'error' | 'invalid';
 
 export function AuthTokenPage() {
-  const { token } = useParams<{ token: string }>();
   const navigate = useNavigate();
-  const [state, setState] = useState<State>('idle');
+  // Read the token from the fragment exactly once, while initialising state, so a
+  // second effect run (React StrictMode in dev) cannot see the already-cleared hash.
+  // Fragments are never sent to the server; clearing it afterwards also keeps it out
+  // of browser history and away from copy-paste.
+  const [token] = useState<string>(() => readTokenFromHash());
+  const [state, setState] = useState<State>(token ? 'idle' : 'invalid');
+
+  useEffect(() => {
+    if (window.location.hash) {
+      history.replaceState(null, '', '/auth');
+    }
+  }, []);
 
   async function handleEntrar() {
     if (!token) return;
@@ -19,6 +29,61 @@ export function AuthTokenPage() {
     } catch {
       setState('error');
     }
+  }
+
+  if (state === 'invalid') {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+        <Header />
+        <main
+          style={{
+            flex: 1,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '48px 16px',
+          }}
+        >
+          <div
+            style={{
+              width: '100%',
+              maxWidth: 360,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 24,
+            }}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <h1
+                style={{
+                  margin: 0,
+                  fontFamily: "'Space Grotesk', sans-serif",
+                  fontWeight: 600,
+                  fontSize: 28,
+                  letterSpacing: '-0.015em',
+                }}
+              >
+                Link usado o vencido
+              </h1>
+              <p style={{ margin: 0, fontSize: 15, lineHeight: 1.5, color: 'var(--muted)' }}>
+                Este link ya fue usado o venció. Pide uno nuevo.
+              </p>
+            </div>
+            <a
+              href="/entrar"
+              style={{
+                alignSelf: 'flex-start',
+                fontSize: 14,
+                color: 'var(--accent)',
+                textDecoration: 'none',
+              }}
+            >
+              Volver a entrar →
+            </a>
+          </div>
+        </main>
+      </div>
+    );
   }
 
   if (state === 'error') {
@@ -138,4 +203,9 @@ export function AuthTokenPage() {
       </main>
     </div>
   );
+}
+
+function readTokenFromHash(): string {
+  const hash = window.location.hash;
+  return hash.startsWith('#') ? hash.slice(1) : hash;
 }

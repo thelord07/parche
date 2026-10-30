@@ -89,9 +89,22 @@ export async function webAuthRoutes(app: FastifyInstance, opts: AuthRouteOptions
   // -------------------------------------------------------------------------
   // POST /api/web/auth/request
   // -------------------------------------------------------------------------
+  // IP-level rate limit constants — not an env var, intentional
+  const IP_RATE_LIMIT_MAX = 10;
+  const IP_RATE_LIMIT_WINDOW = '15 minutes';
+
   app.post<{ Body: { email?: unknown } }>(
     '/api/web/auth/request',
-    { preHandler: [csrfHook] },
+    {
+      config: {
+        rateLimit: {
+          max: IP_RATE_LIMIT_MAX,
+          timeWindow: IP_RATE_LIMIT_WINDOW,
+          keyGenerator: (req) => req.ip,
+        },
+      },
+      preHandler: [csrfHook],
+    },
     async (request, reply) => {
       const rawEmail =
         typeof request.body === 'object' && request.body !== null && 'email' in request.body

@@ -1,6 +1,6 @@
 /**
  * AC3: POST /api/web/auth/verify
- * - N GET /auth/:token do not consume (scanner test)
+ * - N GET /auth (token in fragment, never sent to server) do not consume (scanner test)
  * - POST consumes → 200 + cookie
  * - 2nd POST → 410
  * - expired → 410
@@ -89,14 +89,15 @@ describe('POST /api/web/auth/verify (AC3)', () => {
     return token;
   }
 
-  it('N GET /auth/:token leaves token valid (scanner test)', async () => {
+  it('N GET /auth (fragment not sent) leaves token valid (scanner test)', async () => {
     const token = insertMagicLink('creator@example.com');
 
-    // Simulate N GET requests (SPA route served by fallback)
+    // Simulate N GET requests exactly as a browser would send them:
+    // the fragment (#token) is never transmitted, so the server only sees GET /auth.
     for (let i = 0; i < 5; i++) {
       const res = await app.inject({
         method: 'GET',
-        url: `/auth/${token}`,
+        url: '/auth',
         headers: { accept: 'text/html' },
       });
       expect(res.statusCode).toBe(200);

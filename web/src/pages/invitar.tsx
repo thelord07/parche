@@ -61,7 +61,17 @@ export function InvitarPage() {
     setCreating(true);
     setCreateError('');
     try {
-      const parsed = maxUses.trim() ? parseInt(maxUses, 10) : null;
+      const trimmed = maxUses.trim();
+      let parsed: number | null = null;
+      if (trimmed) {
+        const num = Number(trimmed);
+        if (!Number.isInteger(num) || num < 1) {
+          setCreateError('Usos máximos debe ser un número entero mayor a 0.');
+          setCreating(false);
+          return;
+        }
+        parsed = num;
+      }
       const result = await api.createInvite(slug, role, expires, parsed);
       setNewInvite({ code: result.code });
       const updated = await api.getInvites(slug);
@@ -399,6 +409,7 @@ export function InvitarPage() {
                       id="usos"
                       type="number"
                       min="1"
+                      step="1"
                       value={maxUses}
                       onChange={(e) => setMaxUses(e.target.value)}
                       placeholder="∞"

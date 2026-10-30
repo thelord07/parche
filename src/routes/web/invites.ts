@@ -52,8 +52,9 @@ export async function webInvitesRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(403).send({ error: 'forbidden' });
       }
 
-      // Fetch active invites with creator names in a single JOIN query
-      const rows = app.db
+      // Fetch active invites: not revoked, not expired, not exhausted
+      const now = new Date().toISOString();
+      const allRows = app.db
         .select({
           id: invites.id,
           codeHint: invites.codeHint,
@@ -68,6 +69,14 @@ export async function webInvitesRoutes(app: FastifyInstance): Promise<void> {
         .innerJoin(users, eq(invites.createdBy, users.id))
         .where(and(eq(invites.groupId, grp.id), isNull(invites.revokedAt)))
         .all();
+
+      // Filter out expired and exhausted invites in application code
+      // (SQLite nullable column comparisons are cleaner this way)
+      const rows = allRows.filter((row) => {
+        if (row.expiresAt !== null && row.expiresAt <= now) return false;
+        if (row.maxUses !== null && row.uses >= row.maxUses) return false;
+        return true;
+      });
 
       const result = rows.map((row) => {
         const hint = row.codeHint ? `${row.codeHint}-••••` : '••••-••••';
@@ -146,7 +155,20 @@ export async function webInvitesRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: 'bad_request', message: 'invalid expires' });
       }
 
-      const maxUses = typeof maxUsesVal === 'number' && maxUsesVal > 0 ? maxUsesVal : null;
+      // M2: maxUses must be a positive integer >= 1, or null/absent
+      // Reject non-numbers (strings), decimals (2.5), zero, and negatives
+      let maxUses: number | null;
+      if (maxUsesVal === undefined || maxUsesVal === null) {
+        maxUses = null;
+      } else if (
+        typeof maxUsesVal !== 'number' ||
+        !Number.isInteger(maxUsesVal) ||
+        maxUsesVal < 1
+      ) {
+        return reply.status(400).send({ error: 'bad_request', message: 'invalid maxUses' });
+      } else {
+        maxUses = maxUsesVal;
+      }
 
       const code = generateInviteCode();
       const codeHash = hashInviteCode(code);

@@ -120,7 +120,7 @@ describe('POST /api/web/auth/request (AC2)', () => {
 
   it('email counter advances even for unknown email — counter does not affect response code', async () => {
     // Send 4 requests for unknown email — all should be 200
-    // (keeping under the IP rate limit of 5/15min to avoid 429)
+    // (keeping under the IP rate limit of 10/15min to avoid 429)
     for (let i = 0; i < 4; i++) {
       const res = await app.inject({
         method: 'POST',
@@ -262,5 +262,183 @@ describe('POST /api/web/auth/request — mutation check: unknown email must coun
     expect(emailCountersSize()).toBe(1);
     // No mail sent (unknown email)
     expect(testTransport.sent).toHaveLength(0);
+  });
+});
+
+describe('POST /api/web/auth/request — IP rate limit (F1)', () => {
+  /**
+   * F1: An IP-level rate limit (max 10/15 min) must apply before any email
+   * eligibility check so the 429 does not reveal whether an email exists.
+   *
+   * 10 requests from one IP (mix of known/unknown emails) → all 200.
+   * 11th → 429 for both a known creator and an unknown email.
+   * Another IP is unaffected.
+   */
+  let dataDir: string;
+  let app: import('fastify').FastifyInstance;
+  let testTransport: ReturnType<typeof createTestTransport>;
+  let backgroundWorkPromises: Promise<void>[];
+
+  beforeEach(async () => {
+    resetEmailCounters();
+    dataDir = await makeTempDataDir();
+    testTransport = createTestTransport();
+    backgroundWorkPromises = [];
+
+    app = await makeApp(
+      dataDir,
+      makeConfig(dataDir, {
+        creators: ['creator@example.com'],
+        publicUrl: 'http://localhost',
+        // trustProxy needed for inject remoteAddress override to work
+        trustProxy: '127.0.0.1',
+      }),
+      {
+        transport: testTransport.transporter,
+        onBackgroundWork: (p) => backgroundWorkPromises.push(p),
+      },
+    );
+  });
+
+  afterEach(async () => {
+    await app.close();
+    await cleanupDir(dataDir);
+    resetEmailCounters();
+  });
+
+  async function requestAs(ip: string, email: string) {
+    return app.inject({
+      method: 'POST',
+      url: '/api/web/auth/request',
+      headers: {
+        ...CSRF_HEADERS,
+        'x-forwarded-for': ip,
+      },
+      remoteAddress: ip,
+      payload: { email },
+    });
+  }
+
+  it('10 requests from one IP with different emails → all 200', async () => {
+    for (let i = 0; i < 10; i++) {
+      // Alternate between known creator and unknown to ensure limit is IP-based
+      const email = i % 2 === 0 ? 'creator@example.com' : `unknown${i}@nowhere.example`;
+      const res = await requestAs('1.2.3.4', email);
+      expect(res.statusCode).toBe(200);
+    }
+    await Promise.all(backgroundWorkPromises);
+  });
+
+  it('11th request from same IP → 429 for known email', async () => {
+    for (let i = 0; i < 10; i++) {
+      await requestAs('1.2.3.4', `user${i}@example.com`);
+    }
+    await Promise.all(backgroundWorkPromises);
+    backgroundWorkPromises = [];
+
+    const res = await requestAs('1.2.3.4', 'creator@example.com');
+    expect(res.statusCode).toBe(429);
+  });
+
+  it('11th request from same IP → 429 for unknown email (no info leakage)', async () => {
+    for (let i = 0; i < 10; i++) {
+      await requestAs('1.2.3.4', `user${i}@example.com`);
+    }
+    await Promise.all(backgroundWorkPromises);
+    backgroundWorkPromises = [];
+
+    const res = await requestAs('1.2.3.4', 'nobody@nowhere.example');
+    expect(res.statusCode).toBe(429);
+  });
+
+  it("a different IP is unaffected by the first IP's rate limit", async () => {
+    // Exhaust IP 1.2.3.4
+    for (let i = 0; i < 10; i++) {
+      await requestAs('1.2.3.4', `user${i}@example.com`);
+    }
+    await Promise.all(backgroundWorkPromises);
+    backgroundWorkPromises = [];
+
+    const res11 = await requestAs('1.2.3.4', 'creator@example.com');
+    expect(res11.statusCode).toBe(429);
+
+    // IP 5.6.7.8 gets a fresh 200
+    const resOther = await requestAs('5.6.7.8', 'creator@example.com');
+    expect(resOther.statusCode).toBe(200);
+  });
+
+  it('per-email limit still works independently (not replaced by IP limit)', async () => {
+    // Send 5 requests for the same email from different IPs → email counter tracks this
+    for (let i = 0; i < 5; i++) {
+      const res = await requestAs(`10.0.0.${i + 1}`, 'creator@example.com');
+      expect(res.statusCode).toBe(200);
+    }
+    await Promise.all(backgroundWorkPromises);
+    backgroundWorkPromises = [];
+
+    // The per-email counter should have tracked exactly one email hash
+    expect(emailCountersSize()).toBe(1);
+  });
+});
+
+describe('POST /api/web/auth/request — mutation check: IP limit applies before email check', () => {
+  /**
+   * Guards the IP limit itself: without it (or with a much higher max) the 11th
+   * request would be 200 instead of 429. Verified by raising IP_RATE_LIMIT_MAX.
+   */
+  let dataDir: string;
+  let app: import('fastify').FastifyInstance;
+  let testTransport: ReturnType<typeof createTestTransport>;
+  let backgroundWorkPromises: Promise<void>[];
+
+  beforeEach(async () => {
+    resetEmailCounters();
+    dataDir = await makeTempDataDir();
+    testTransport = createTestTransport();
+    backgroundWorkPromises = [];
+
+    app = await makeApp(
+      dataDir,
+      makeConfig(dataDir, {
+        creators: ['creator@example.com'],
+        publicUrl: 'http://localhost',
+        trustProxy: '127.0.0.1',
+      }),
+      {
+        transport: testTransport.transporter,
+        onBackgroundWork: (p) => backgroundWorkPromises.push(p),
+      },
+    );
+  });
+
+  afterEach(async () => {
+    await app.close();
+    await cleanupDir(dataDir);
+    resetEmailCounters();
+  });
+
+  it('(mutation) after 10 requests, 11th is 429 — confirms IP limit exists', async () => {
+    for (let i = 0; i < 10; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/web/auth/request',
+        headers: { ...CSRF_HEADERS, 'x-forwarded-for': '9.9.9.9' },
+        remoteAddress: '9.9.9.9',
+        payload: { email: `email${i}@example.com` },
+      });
+      expect(res.statusCode).toBe(200);
+    }
+    await Promise.all(backgroundWorkPromises);
+    backgroundWorkPromises = [];
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/web/auth/request',
+      headers: { ...CSRF_HEADERS, 'x-forwarded-for': '9.9.9.9' },
+      remoteAddress: '9.9.9.9',
+      payload: { email: 'creator@example.com' },
+    });
+    // If IP limit did NOT exist this would be 200; the 429 proves the limit applies
+    expect(res.statusCode).toBe(429);
   });
 });

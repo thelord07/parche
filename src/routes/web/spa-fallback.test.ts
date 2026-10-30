@@ -1,7 +1,8 @@
 /**
  * AC10: SPA fallback + static serving
  * - /g/x/invitar → 200 text/html (SPA)
- * - /auth/abc → 200 text/html + Referrer-Policy: no-referrer
+ * - /auth → 200 text/html + Referrer-Policy: no-referrer
+ *   (token is in the fragment, never sent to the server)
  * - /j/code → 200 text/html + Referrer-Policy: no-referrer
  * - /api/nada → 404 JSON {error: 'not found'}
  * - /health → 200
@@ -49,10 +50,12 @@ describe('SPA fallback (AC10)', () => {
     expect(res.headers['content-type']).toMatch(/text\/html/);
   });
 
-  it('/auth/abc → 200 text/html + Referrer-Policy: no-referrer', async () => {
+  it('/auth → 200 text/html + Referrer-Policy: no-referrer (fragment never sent to server)', async () => {
+    // The browser sends GET /auth — the fragment (#token) is never sent to the server.
+    // The server must serve the SPA at /auth with Referrer-Policy: no-referrer.
     const res = await app.inject({
       method: 'GET',
-      url: '/auth/sometoken',
+      url: '/auth',
       headers: { accept: 'text/html,*/*' },
     });
     expect(res.statusCode).toBe(200);

@@ -10,7 +10,7 @@ export function App() {
   return (
     <Routes>
       <Route path="/entrar" element={<EntrarPage />} />
-      <Route path="/auth/:token" element={<AuthTokenPage />} />
+      <Route path="/auth" element={<AuthTokenPage />} />
       <Route path="/j/:codigo" element={<UnisrsePage />} />
       <Route path="/" element={<InicioPage />} />
       <Route path="/nuevo" element={<NuevoPage />} />
