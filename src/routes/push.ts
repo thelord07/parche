@@ -4,6 +4,12 @@ import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { authenticate, requireCan } from '../auth/plugin.js';
 import { blobRefs, changes, files, groups } from '../db/schema.js';
+import { updateFileMetaFromBlob } from '../meta/file-meta.js';
+import type { StoragePort } from '../storage/storage-port.js';
+
+export interface PushRouteOpts {
+  storage?: StoragePort;
+}
 
 // ---------------------------------------------------------------------------
 // Sentinel error for case collisions — thrown inside the transaction
@@ -23,7 +29,8 @@ class CaseCollisionError extends Error {
 // Route
 // ---------------------------------------------------------------------------
 
-export async function pushRoutes(app: FastifyInstance): Promise<void> {
+export async function pushRoutes(app: FastifyInstance, opts: PushRouteOpts = {}): Promise<void> {
+  const { storage } = opts;
   app.post<{ Params: { slug: string } }>(
     '/api/g/:slug/push',
     { preHandler: [authenticate, requireCan('write')] },
@@ -177,6 +184,34 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const body = pushResponseSchema.parse({ results });
+
+      // Post-push: update file_meta for ok results with .md files.
+      // Fire-and-forget OUTSIDE the transaction. Error never fails the push.
+      if (storage) {
+        for (const r of results) {
+          if (r.status === 'ok' && r.path.endsWith('.md')) {
+            // Get the hash that was just committed
+            const fileRow = app.db
+              .select({ headHash: files.headHash })
+              .from(files)
+              .where(
+                and(eq(files.groupId, groupId), eq(files.path, r.path), isNotNull(files.headHash)),
+              )
+              .get();
+            if (fileRow?.headHash) {
+              updateFileMetaFromBlob(
+                { db: app.db, storage, log: app.log as { warn: (m: string, o?: unknown) => void } },
+                groupId,
+                r.path,
+                fileRow.headHash,
+              ).catch(() => {
+                // never fails the push
+              });
+            }
+          }
+        }
+      }
+
       return reply.status(200).send(body);
     },
   );

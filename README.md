@@ -66,6 +66,93 @@ built into `dist/web`) on the same domain:
 | `/g/:slug/invitar` | Create invitations (the code is shown once), list them masked, revoke them |
 | `/j/:code` | Join instructions: the `npx @chamba/mcp@latest vault join <code>` command |
 
+### Web app — parte 2 (PARCHE-007)
+
+Group members also get a read-only view of the vault via the web app.
+All routes below require an authenticated session cookie (`parche_session`) and
+active group membership — otherwise `401` (no session) or `404`
+(not a member / group not found).
+
+**Session API** (`/api/web/g/:slug/`):
+
+| Endpoint | Description |
+|---|---|
+| `GET /summary` | Group metadata: name, slug, member count, file count, last-change date |
+| `GET /tree` | Full tree of live `.md` files — path, title, updated-at |
+| `GET /activity` | Paginated change log with author + device labels |
+| `GET /note?path=…` | Rendered note: sanitized HTML (`SanitizedHtml` branded type), frontmatter metadata, change history, backlinks with context snippets |
+| `GET /note/version?path=…&seq=…` | Specific historical version of a note |
+| `GET /diff?path=…&from=…&to=…` | Line diff between two versions (`pairLineDiff`: `eq`/`add`/`del`/`mod`) |
+| `GET /raw?path=…` | Raw blob (never `text/html`; `.svg`/`.pdf` served as `attachment`) |
+| `GET /conflicts` | All live conflict copies for the group |
+| `GET /conflicts/view?path=…` | Conflict detail: conflict copy + base + current |
+| `GET /topics` | All unique frontmatter tags used in the group |
+| `GET /topics/:tag` | Notes tagged with `:tag` |
+
+**Rate limits**: read endpoints 300 req/min; `/raw` 600 req/min (keyed by session cookie).
+
+**Security headers** on every `text/html` response:
+- `Content-Security-Policy: default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`
+- `X-Content-Type-Options: nosniff`
+
+**XSS gate (O1)**: Markdown is rendered server-side with `markdown-it` (`html: false`)
+and then sanitized with `sanitize-html` (explicit allowlist — no `style`, no `on*`
+attributes, only `http`/`https`/`mailto` href schemes). The output is wrapped in a
+`SanitizedHtml` branded type (produced only by `renderNote`). In the SPA,
+`dangerouslySetInnerHTML` is used exclusively in `note-article.tsx` and only receives
+that branded type from `api.getNote`. A static-scan test enforces this invariant.
+
+**`file_meta` table**: background backfill processes all live `.md` files on startup,
+extracting title, summary, tags, work_item, project, conflict metadata, and wikilinks.
+Each blob is parsed at most once (idempotent: skips if `file_meta.hash == files.head_hash`).
+A post-push hook also updates `file_meta` for newly pushed `.md` files in the background
+(fire-and-forget, never blocks or fails the push response).
+
+**Admin command**:
+
+```bash
+node dist/admin-cli.js reindex-meta --group <slug>
+```
+
+Re-indexes all `file_meta` rows from blobs (useful after import or recovery).
+
+### QA seed — `scripts/seed-cya.ts`
+
+A comprehensive fixture for QA and local development. Seeds the `cya` group with
+~50 `.md` notes across folders (`auth/`, `db/`, `decisiones/`, `infra/`, `onboarding/`,
+`api/`, `security/`), including:
+
+- Wikilinks and backlinks (several notes link to `[[flujo-login]]`)
+- Multiple versions of `auth/flujo-login.md` (3 versions from 3 different users/devices at different times — tests activity grouping by day)
+- A conflict copy `auth/flujo-login (conflicto vale).md` with `conflict_of`/`conflict_base` frontmatter
+- Tags `tema/auth`, `tema/db`, `tema/infra`, etc. on many notes
+- `project` and `work_item` frontmatter on several notes
+- A note with XSS payloads (`<script>`, `<img onerror>`, `javascript:` link, `<svg onload>`) for sanitizer validation
+- An image PNG embed (`![[diagrama.png]]`) in `api/arquitectura.md`
+- A rename pair (tombstone `auth/draft-old.md` + create `auth/draft.md` with same hash and same user+device+at)
+
+The seed creates the user `qa@parche.test` as group owner (plus Ana, Beto, Carmen as members).
+It is **idempotent** — safe to run multiple times; never deletes any data.
+
+```bash
+# First run:
+PARCHE_DATA_DIR=./data-qa pnpm seed:qa
+# or equivalently:
+PARCHE_DATA_DIR=./data-qa pnpm tsx scripts/seed-cya.ts
+
+# Subsequent runs are no-ops (all files already exist):
+PARCHE_DATA_DIR=./data-qa pnpm seed:qa
+```
+
+After seeding, start the server to populate `file_meta` via the backfill:
+
+```bash
+PARCHE_DATA_DIR=./data-qa pnpm start
+```
+
+The backfill runs on startup and populates `file_meta` for all live `.md` files.
+Monitor progress via `GET /health` (`metaBackfill: "running" | "done"`).
+
 **Magic link security**: the token is placed in the URL **fragment** (`/auth#<token>`),
 not in the path. Browsers never transmit fragments to the server, so the token never
 appears in Fastify's request logs or in nginx's `access.log`. The server only sees
@@ -83,7 +170,7 @@ to the SPA.
 
 ## Data model
 
-The SQLite database (`<PARCHE_DATA_DIR>/parche.db`, WAL mode) has 8 tables:
+The SQLite database (`<PARCHE_DATA_DIR>/parche.db`, WAL mode) has 9 tables:
 
 | Table | Description |
 |---|---|
@@ -95,6 +182,7 @@ The SQLite database (`<PARCHE_DATA_DIR>/parche.db`, WAL mode) has 8 tables:
 | `files` | Current file state (group_id, path, path_key, head_hash, head_seq) |
 | `changes` | Append-only change log (group_id, seq, path, hash, user_id, device_id) |
 | `blob_refs` | Scopes blob access per group (group_id, hash) |
+| `file_meta` | Extracted metadata per live .md file: title, summary, tags, work_item, project, conflict info, wikilinks |
 
 **Revocation is always UPDATE** — tokens use `revoked_at`, members use `removed_at`, deleted files use a tombstone hash (`null` head_hash). Nothing is ever physically deleted from the database.
 
@@ -125,6 +213,8 @@ node dist/admin-cli.js revoke-device --device-id <id>
 node dist/admin-cli.js revoke-invite --group my-group --code XXXX-XXXX
 
 node dist/admin-cli.js create-device --group my-group --email alice@example.com
+
+node dist/admin-cli.js reindex-meta --group my-group
 ```
 
 All commands read `PARCHE_DATA_DIR` (or `--data-dir`) to find the database.

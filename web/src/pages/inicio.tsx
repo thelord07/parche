@@ -255,20 +255,34 @@ export function InicioPage() {
                     {g.slug} · {ROLE_LABELS[g.role] ?? g.role}
                   </span>
                 </div>
-                {(g.role === 'owner' || g.role === 'admin') && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                   <Link
-                    to={`/g/${g.slug}/invitar`}
+                    to={`/g/${g.slug}`}
                     style={{
                       fontSize: 13,
                       fontWeight: 500,
-                      color: 'var(--accent)',
+                      color: 'var(--text)',
                       textDecoration: 'none',
                       whiteSpace: 'nowrap',
                     }}
                   >
-                    Invitar →
+                    Ver →
                   </Link>
-                )}
+                  {(g.role === 'owner' || g.role === 'admin') && (
+                    <Link
+                      to={`/g/${g.slug}/invitar`}
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 500,
+                        color: 'var(--accent)',
+                        textDecoration: 'none',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      Invitar →
+                    </Link>
+                  )}
+                </div>
               </li>
             ))}
           </ul>

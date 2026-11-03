@@ -15,6 +15,7 @@ const EXPECTED_TABLES = [
   'blob_refs',
   'sessions',
   'magic_links',
+  'file_meta',
 ];
 
 describe('migration files are additive-only', () => {

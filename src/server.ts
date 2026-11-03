@@ -12,15 +12,23 @@ import type { AppDb, RawDb } from './db/client.js';
 import { openDb } from './db/client.js';
 import { runMigrations } from './db/migrate.js';
 import { createMailer } from './mail/mailer.js';
+import { startBackfillBackground } from './meta/backfill.js';
+import type { MetaStatus } from './meta/status.js';
 import { blobRoutes } from './routes/blobs.js';
 import { changesRoutes } from './routes/changes.js';
 import { healthRoutes } from './routes/health.js';
 import { joinRoutes } from './routes/join.js';
 import { pushRoutes } from './routes/push.js';
 import { webAuthRoutes } from './routes/web/auth.js';
+import { conflictRoutes } from './routes/web/conflicts.js';
+import { groupReadRoutes } from './routes/web/group-read.js';
 import { webGroupsRoutes } from './routes/web/groups.js';
 import { webInviteCheckRoutes } from './routes/web/invite-check.js';
 import { webInvitesRoutes } from './routes/web/invites.js';
+import { noteRoutes } from './routes/web/note.js';
+import { topicsRoutes } from './routes/web/topics.js';
+
+export type { MetaStatus };
 
 // ---------------------------------------------------------------------------
 // Fastify instance decoration typings
@@ -30,8 +38,13 @@ declare module 'fastify' {
   interface FastifyInstance {
     db: AppDb;
     rawDb: RawDb;
+    metaStatus: MetaStatus;
   }
 }
+
+// CSP header value for serving the SPA
+const CSP_VALUE =
+  "default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 export interface BuildServerOptions {
   /** Nodemailer transporter — injected so tests can use in-memory transport */
@@ -83,6 +96,10 @@ export async function buildServer(
   app.decorate('db', db);
   app.decorate('rawDb', rawDb);
 
+  // Decorate with metaStatus — tracks file_meta backfill state
+  const metaStatus: MetaStatus = { backfill: 'idle' };
+  app.decorate('metaStatus', metaStatus);
+
   // Close the database when the Fastify server closes so tests can clean
   // up their temp directories without leaving open WAL/SHM handles.
   app.addHook('onClose', async (_instance) => {
@@ -92,24 +109,37 @@ export async function buildServer(
   // Decorate request with webUser (null by default; set by requireWebSession)
   app.decorateRequest('webUser', null);
 
+  // Decorate request with webGroup (null by default; set by requireWebGroup)
+  app.decorateRequest('webGroup', null);
+
   // Register cookie plugin (needed for web session)
   await app.register(fastifyCookie);
 
   // Register auth decorator — must come before any route that uses authenticate
   registerAuth(app);
 
-  // Rate limiting — global:false means per-route opt-in only (join uses it)
+  // Rate limiting — global:false means per-route opt-in only
   await app.register(rateLimit, { global: false });
 
   const storage = await import('./storage/filesystem-storage.js').then(
     (m) => new m.FilesystemStorage(config.dataDir, config.maxBlobBytes),
   );
 
+  // CSP + nosniff hook: applies to all HTML responses (SPA pages)
+  app.addHook('onSend', (_request, reply, _payload, done) => {
+    const ct = reply.getHeader('content-type');
+    if (typeof ct === 'string' && ct.includes('text/html')) {
+      reply.header('Content-Security-Policy', CSP_VALUE);
+      reply.header('X-Content-Type-Options', 'nosniff');
+    }
+    done();
+  });
+
   await app.register(healthRoutes);
   await app.register(blobRoutes, { storage });
   await app.register(joinRoutes);
   await app.register(changesRoutes);
-  await app.register(pushRoutes);
+  await app.register(pushRoutes, { storage });
 
   // -------------------------------------------------------------------------
   // Web (SPA) routes — mailer required
@@ -125,6 +155,12 @@ export async function buildServer(
     await app.register(webGroupsRoutes, { config });
     await app.register(webInvitesRoutes);
     await app.register(webInviteCheckRoutes);
+
+    // New read-only group routes (S8–S12)
+    await app.register(groupReadRoutes);
+    await app.register(noteRoutes, { storage });
+    await app.register(conflictRoutes, { storage });
+    await app.register(topicsRoutes);
   }
 
   // -------------------------------------------------------------------------
@@ -179,6 +215,14 @@ export async function buildServer(
     }
 
     return reply.status(404).send({ error: 'not found' });
+  });
+
+  // Start backfill in background — does not block listen()
+  startBackfillBackground({
+    db,
+    storage,
+    metaStatus,
+    log: app.log as { warn(m: string, o?: unknown): void; info(m: string, o?: unknown): void },
   });
 
   return app;

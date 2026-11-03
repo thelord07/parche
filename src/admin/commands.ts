@@ -351,3 +351,21 @@ export async function backupDb(rawDb: RawDb, dest: string): Promise<void> {
   await mkdir(dirname(dest), { recursive: true });
   await rawDb.backup(dest);
 }
+
+// ---------------------------------------------------------------------------
+// reindex-meta — synchronous backfill for ops (runs backfill to completion)
+// ---------------------------------------------------------------------------
+
+import type { StoragePort } from '../storage/storage-port.js';
+
+/**
+ * Re-index all file_meta rows from blobs. Used by the admin CLI command.
+ * Runs synchronously to completion — not fire-and-forget.
+ * Uses process.stdout.write, never console.*.
+ */
+export async function reindexMeta(db: AppDb, storage: StoragePort): Promise<void> {
+  const { runBackfill } = await import('../meta/backfill.js');
+  const metaStatus = { backfill: 'idle' as 'idle' | 'running' | 'done' };
+  await runBackfill({ db, storage, metaStatus });
+  process.stdout.write('reindex-meta: done\n');
+}

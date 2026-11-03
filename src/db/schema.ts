@@ -196,3 +196,30 @@ export const blobRefs = sqliteTable(
   },
   (t) => [primaryKey({ columns: [t.groupId, t.hash] })],
 );
+
+// ---------------------------------------------------------------------------
+// file_meta — extracted metadata per live file (one row per path, head hash)
+// ---------------------------------------------------------------------------
+
+export const fileMeta = sqliteTable(
+  'file_meta',
+  {
+    groupId: text('group_id').notNull(),
+    path: text('path').notNull(),
+    hash: text('hash').notNull(),
+    title: text('title'),
+    summary: text('summary'),
+    type: text('type'),
+    tagsJson: text('tags_json'),
+    workItem: text('work_item'),
+    project: text('project'),
+    conflictOf: text('conflict_of'),
+    conflictBase: text('conflict_base'),
+    linksJson: text('links_json'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.groupId, t.path] }),
+    index('file_meta_group_idx').on(t.groupId),
+    index('file_meta_conflict_idx').on(t.groupId, t.conflictOf),
+  ],
+);
