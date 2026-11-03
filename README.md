@@ -188,6 +188,10 @@ The SQLite database (`<PARCHE_DATA_DIR>/parche.db`, WAL mode) has 9 tables:
 
 **Revocation is always UPDATE** — tokens use `revoked_at`, members use `removed_at`, deleted files use a tombstone hash (`null` head_hash). Nothing is ever physically deleted from the database.
 
+### Migrations
+
+Generate migrations **only** with `pnpm drizzle-kit generate` and never edit `when` in `src/db/migrations/meta/_journal.json` by hand. Drizzle applies a migration only if its `when` is greater than the newest one recorded in `__drizzle_migrations`; a migration with an older `when` is silently skipped on existing databases (PARCHE-007A-HOTFIX: `0002_add_file_meta` shipped with a `when` older than `0001`, so production never got `file_meta`). `src/db/migrate.test.ts` fails CI if the `when` values are not strictly increasing.
+
 ## Authentication
 
 All API routes except `/health` and `POST /api/join` require a Bearer token:
