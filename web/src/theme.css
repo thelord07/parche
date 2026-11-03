@@ -7,7 +7,9 @@
 @import "@fontsource/jetbrains-mono/400.css";
 @import "@fontsource/jetbrains-mono/500.css";
 
+/* ─── Dark theme (base) ─────────────────────────────────────────────────────── */
 :root {
+  color-scheme: light dark;
   --bg: oklch(0.165 0.012 66);
   --bg2: oklch(0.205 0.014 66);
   --card: oklch(0.225 0.015 66);
@@ -16,10 +18,30 @@
   --muted: oklch(0.705 0.014 78);
   --ok: oklch(0.77 0.11 165);
   --warn: oklch(0.83 0.11 88);
+  /* text-specific ok/warn (same in dark, darker in light for AA contrast) */
+  --ok-text: oklch(0.77 0.11 165);
+  --warn-text: oklch(0.83 0.11 88);
   --accent: #d97a4f;
   /* Derived: change --accent once and both hover tints follow */
   --accent-hover: color-mix(in srgb, var(--accent) 87%, white);
   --accent-link-hover: color-mix(in srgb, var(--accent) 80%, white);
+}
+
+/* ─── Light theme ───────────────────────────────────────────────────────────── */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: oklch(0.985 0.004 82);
+    --bg2: oklch(0.96 0.006 80);
+    --card: oklch(1 0 0);
+    --border: oklch(0.87 0.01 75);
+    --text: oklch(0.22 0.012 66);
+    --muted: oklch(0.47 0.014 70);
+    /* ok/warn decorative stays visually consistent; text version gets darker for AA */
+    --ok-text: oklch(0.48 0.1 165);
+    --warn-text: oklch(0.52 0.11 75);
+    --accent-hover: #cf6f45;
+    --accent-link-hover: #b55d33;
+  }
 }
 
 *,
@@ -57,6 +79,146 @@ button {
 
 input::placeholder {
   color: var(--muted);
+}
+
+/* ─── Note article styles ───────────────────────────────────────────────────── */
+
+/* Wikilinks: dashed underline, navigate within SPA */
+.note-article .wl {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--muted);
+}
+
+.note-article .wl:hover {
+  border-bottom-color: var(--accent-link-hover);
+  color: var(--accent-link-hover);
+}
+
+.note-article .wl-dead {
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--border);
+}
+
+/* Article typography */
+.note-article h1,
+.note-article h2,
+.note-article h3,
+.note-article h4 {
+  font-family: "Space Grotesk", sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.note-article h1 {
+  font-size: 28px;
+  line-height: 1.2;
+  margin: 0 0 12px;
+}
+.note-article h2 {
+  font-size: 20px;
+  line-height: 1.3;
+  margin: 20px 0 8px;
+}
+.note-article h3 {
+  font-size: 17px;
+  line-height: 1.35;
+  margin: 16px 0 6px;
+}
+
+.note-article p {
+  margin: 0 0 12px;
+}
+
+.note-article code {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.875em;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.note-article pre {
+  margin: 0 0 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+  overflow-x: auto;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.note-article pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+.note-article ul,
+.note-article ol {
+  margin: 0 0 12px;
+  padding-left: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.note-article blockquote {
+  margin: 0 0 12px;
+  padding: 8px 16px;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.note-article img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.note-article table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+
+.note-article th,
+.note-article td {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.note-article th {
+  background: var(--bg2);
+  font-weight: 600;
+}
+
+.note-article hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 20px 0;
+}
+
+/* ─── Responsive: header ───────────────────────────────────────────────────── */
+
+/* Below 640 px: hide intermediate breadcrumb segments and the email label.
+ * Only the logo and the last crumb remain; email is replaced by the avatar chip. */
+@media (max-width: 639px) {
+  .header-crumb-mid {
+    display: none;
+  }
+
+  .header-email {
+    display: none;
+  }
 }
 
 /* ─── Responsive: invite table ─────────────────────────────────────────────── */
@@ -113,6 +275,7 @@ input::placeholder {
   overflow: hidden;
 }
 
+/* biome-ignore lint/style/noDescendingSpecificity: .code-block code and .note-article pre code target entirely different component contexts; no specificity conflict in practice */
 .code-block code {
   flex: 1;
   min-width: 0;

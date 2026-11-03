@@ -23,6 +23,7 @@ import {
   createGroup,
   createInvite,
   listMembers,
+  reindexMeta,
   revokeDevice,
   revokeInvite,
 } from './commands.js';
@@ -32,7 +33,7 @@ async function main(): Promise<void> {
   if (!command) {
     process.stderr.write(
       'Usage: parche-admin <command> [options]\n' +
-        'Commands: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device, backup-db\n',
+        'Commands: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device, backup-db, reindex-meta\n',
     );
     process.exit(1);
   }
@@ -167,6 +168,13 @@ async function main(): Promise<void> {
         break;
       }
 
+      case 'reindex-meta': {
+        const { FilesystemStorage } = await import('../storage/filesystem-storage.js');
+        const storage = new FilesystemStorage(config.dataDir, config.maxBlobBytes);
+        await reindexMeta(db, storage);
+        break;
+      }
+
       case 'backup-db': {
         const dest = process.argv[3];
         if (!dest || dest.trim() === '') {
@@ -182,7 +190,7 @@ async function main(): Promise<void> {
       default: {
         throw new Error(
           `Unknown command '${command}'. ` +
-            'Available: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device, backup-db',
+            'Available: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device, backup-db, reindex-meta',
         );
       }
     }

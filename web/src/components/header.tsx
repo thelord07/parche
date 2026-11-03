@@ -26,32 +26,64 @@ export function Header({ user, breadcrumb }: HeaderProps) {
           alignItems: 'center',
           gap: 8,
           minWidth: 0,
+          overflow: 'hidden',
           fontFamily: "'JetBrains Mono', monospace",
           fontSize: 13,
         }}
       >
-        <Link to="/" style={{ textDecoration: 'none' }}>
+        {/* Logo is always visible — prevent it from shrinking */}
+        <Link to="/" style={{ textDecoration: 'none', flexShrink: 0 }}>
           <Logo />
         </Link>
         {!breadcrumb && (
           <span style={{ color: 'var(--muted)', marginLeft: 8, fontSize: 12 }}>by chamba</span>
         )}
-        {breadcrumb?.map((crumb) => (
-          <span key={crumb.label} style={{ display: 'contents' }}>
-            <span style={{ color: 'var(--muted)' }}>/</span>
+        {breadcrumb?.map((crumb, i) => (
+          /* header-crumb-mid: hidden below 640 px via theme.css so only the last
+             segment (deepest path) is shown on narrow screens. */
+          <span
+            key={crumb.label}
+            className={
+              breadcrumb.length > 1 && i < breadcrumb.length - 1 ? 'header-crumb-mid' : undefined
+            }
+            style={{ display: 'contents' }}
+          >
+            <span style={{ color: 'var(--muted)', flexShrink: 0 }}>/</span>
             {crumb.href ? (
-              <Link to={crumb.href} style={{ textDecoration: 'none', color: 'var(--text)' }}>
+              <Link
+                to={crumb.href}
+                style={{
+                  textDecoration: 'none',
+                  color: 'var(--text)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  minWidth: 0,
+                }}
+              >
                 {crumb.label}
               </Link>
             ) : (
-              <span style={{ color: 'var(--muted)' }}>{crumb.label}</span>
+              <span
+                style={{
+                  color: 'var(--muted)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  minWidth: 0,
+                }}
+              >
+                {crumb.label}
+              </span>
             )}
           </span>
         ))}
       </div>
       {user && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          {/* header-email: hidden below 640 px via theme.css, keeping only the avatar chip */}
           <span
+            className="header-email"
             style={{
               fontFamily: "'JetBrains Mono', monospace",
               fontSize: 12,

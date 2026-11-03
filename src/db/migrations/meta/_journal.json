@@ -15,6 +15,13 @@
       "when": 1793238917579,
       "tag": "0001_add_sessions_magic_links_code_hint",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1751500000000,
+      "tag": "0002_add_file_meta",
+      "breakpoints": true
     }
   ]
 }
