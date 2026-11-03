@@ -326,6 +326,105 @@ describe('GET /api/web/g/:slug/note — behavior', () => {
     }
   });
 
+  // M1: tombstoned files must not appear in backlinks
+  it('M1: tombstoned file A does not appear in backlinks of file B', async () => {
+    // File B (the target we will GET)
+    const contentB = '# File B\n\nContent of B.';
+    const hashB = sha256hex(contentB);
+    ctx.app.db
+      .insert(blobRefs)
+      .values({ groupId: ctx.device.groupId, hash: hashB })
+      .onConflictDoNothing()
+      .run();
+    ctx.app.db
+      .insert(files)
+      .values({
+        groupId: ctx.device.groupId,
+        path: 'folder/b.md',
+        pathKey: 'folder/b.md',
+        headHash: hashB,
+        headSeq: 1,
+      })
+      .onConflictDoUpdate({
+        target: [files.groupId, files.path],
+        set: { headHash: hashB, headSeq: 1 },
+      })
+      .run();
+    ctx.app.db
+      .insert(changes)
+      .values({
+        groupId: ctx.device.groupId,
+        seq: 1,
+        path: 'folder/b.md',
+        hash: hashB,
+        userId: ctx.device.userId,
+        deviceId: ctx.device.deviceId,
+        at: new Date().toISOString(),
+      })
+      .onConflictDoNothing()
+      .run();
+
+    // File A links to B; then tombstone A (head_hash = null)
+    const hashA = sha256hex('# A\n\n[[b]]');
+    ctx.app.db
+      .insert(blobRefs)
+      .values({ groupId: ctx.device.groupId, hash: hashA })
+      .onConflictDoNothing()
+      .run();
+    ctx.app.db
+      .insert(files)
+      .values({
+        groupId: ctx.device.groupId,
+        path: 'a.md',
+        pathKey: 'a.md',
+        headHash: null, // tombstone
+        headSeq: 2,
+      })
+      .onConflictDoUpdate({
+        target: [files.groupId, files.path],
+        set: { headHash: null, headSeq: 2 },
+      })
+      .run();
+    ctx.app.db
+      .insert(changes)
+      .values({
+        groupId: ctx.device.groupId,
+        seq: 2,
+        path: 'a.md',
+        hash: null,
+        userId: ctx.device.userId,
+        deviceId: ctx.device.deviceId,
+        at: new Date().toISOString(),
+      })
+      .onConflictDoNothing()
+      .run();
+
+    // Insert file_meta for A (as if it was extracted before tombstoning)
+    ctx.app.db
+      .insert(fileMeta)
+      .values({
+        groupId: ctx.device.groupId,
+        path: 'a.md',
+        hash: hashA,
+        linksJson: JSON.stringify([{ target: 'b', snippet: 'links to b' }]),
+      })
+      .onConflictDoNothing()
+      .run();
+
+    // GET /note for B — tombstoned A must NOT be in backlinks
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/note-grp/note?path=folder/b.md',
+      cookies: { parche_session: ctx.session },
+    });
+    expect(res.statusCode).toBe(200);
+    const { backlinks } = res.json<{
+      backlinks: Array<{ path: string }>;
+    }>();
+    const backlinkPaths = backlinks.map((bl) => bl.path);
+    expect(backlinkPaths).not.toContain('a.md');
+  });
+
   it('wikilinks with spaces and ñ are encoded per segment in rendered HTML', async () => {
     const { renderNote } = await import('../../meta/render.js');
     const knownPaths = new Set(['notes/mi nota con ñ.md', 'notes/hola mundo.md']);

@@ -89,6 +89,8 @@ active group membership — otherwise `401` (no session) or `404`
 | `GET /topics` | All unique frontmatter tags used in the group |
 | `GET /topics/:tag` | Notes tagged with `:tag` |
 
+**Backlink matching** in `/note` uses suffix resolution: `[[README]]` is considered a backlink from any `*/README.md` in the vault. This is intentionally lax — it avoids requiring full paths in wikilinks at the cost of occasional false positives in vaults with identically named files in different folders.
+
 **Rate limits**: read endpoints 300 req/min; `/raw` 600 req/min (keyed by session cookie).
 
 **Security headers** on every `text/html` response:

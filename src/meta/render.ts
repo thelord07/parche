@@ -56,6 +56,9 @@ const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   },
   disallowedTagsMode: 'discard' as const,
   allowVulnerableTags: false,
+  // M3: block protocol-relative URLs (//evil.com) — they are not XSS but redirect
+  // users to external domains without the `rel` added by transformTags.a below.
+  allowProtocolRelative: false,
   // Allow internal relative hrefs (starting with /) via transformTags
   transformTags: {
     a: (tagName, attribs) => {

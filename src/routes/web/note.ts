@@ -155,10 +155,20 @@ export async function noteRoutes(app: FastifyInstance, opts: NoteRouteOpts): Pro
         if (!meta) metaPending = true;
       }
 
-      // Backlinks: other files in this group that link to this path
+      // Backlinks: other *live* files in this group that link to this path.
+      // We inner-join with `files` on (groupId, path) and require head_hash IS NOT NULL
+      // so that tombstoned files are excluded — the same criterion used by /conflicts.
       const allMeta = app.db
         .select({ path: fileMeta.path, title: fileMeta.title, linksJson: fileMeta.linksJson })
         .from(fileMeta)
+        .innerJoin(
+          files,
+          and(
+            eq(files.groupId, fileMeta.groupId),
+            eq(files.path, fileMeta.path),
+            isNotNull(files.headHash),
+          ),
+        )
         .where(and(eq(fileMeta.groupId, groupId), isNotNull(fileMeta.linksJson)))
         .all();
 
@@ -172,6 +182,9 @@ export async function noteRoutes(app: FastifyInstance, opts: NoteRouteOpts): Pro
           }>;
           for (const link of links) {
             const t = link.target;
+            // NOTE: suffix matching is intentionally lax — [[README]] matches any
+            // */README.md path in the vault. This is a deliberate trade-off: it
+            // avoids requiring callers to use full paths in wikilinks.
             if (
               t === path ||
               t + '.md' === path ||

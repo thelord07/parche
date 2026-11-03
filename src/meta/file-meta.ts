@@ -1,6 +1,7 @@
 import type { Readable } from 'node:stream';
+import { and, eq } from 'drizzle-orm';
 import type { AppDb } from '../db/client.js';
-import { fileMeta } from '../db/schema.js';
+import { fileMeta, files } from '../db/schema.js';
 import type { StoragePort } from '../storage/storage-port.js';
 import { parseNote } from './parser.js';
 
@@ -34,25 +35,26 @@ export async function updateFileMetaFromBlob(
     const content = await readStream(stream);
     const parsed = parseNote(content);
 
-    deps.db
-      .insert(fileMeta)
-      .values({
-        groupId,
-        path,
-        hash,
-        title: parsed.title ?? null,
-        summary: parsed.summary ?? null,
-        type: parsed.type ?? null,
-        tagsJson: parsed.tags.length > 0 ? JSON.stringify(parsed.tags) : null,
-        workItem: parsed.workItem ?? null,
-        project: parsed.project ?? null,
-        conflictOf: parsed.conflictOf ?? null,
-        conflictBase: parsed.conflictBase ?? null,
-        linksJson: parsed.links.length > 0 ? JSON.stringify(parsed.links) : null,
-      })
-      .onConflictDoUpdate({
-        target: [fileMeta.groupId, fileMeta.path],
-        set: {
+    // M2 — guard against out-of-order fire-and-forget calls.
+    // Two pushes for the same path can kick off extractions concurrently; the
+    // slower one (stale hash) must not overwrite the fresher result already
+    // written by the faster one.  We check files.head_hash inside a synchronous
+    // better-sqlite3 transaction so no concurrent write can slip between the
+    // check and the INSERT/UPDATE.
+    deps.db.transaction((tx) => {
+      const currentFile = tx
+        .select({ headHash: files.headHash })
+        .from(files)
+        .where(and(eq(files.groupId, groupId), eq(files.path, path)))
+        .get();
+
+      // Skip if hash is no longer (or never was) the head — this extraction is stale.
+      if (currentFile?.headHash !== hash) return;
+
+      tx.insert(fileMeta)
+        .values({
+          groupId,
+          path,
           hash,
           title: parsed.title ?? null,
           summary: parsed.summary ?? null,
@@ -63,9 +65,24 @@ export async function updateFileMetaFromBlob(
           conflictOf: parsed.conflictOf ?? null,
           conflictBase: parsed.conflictBase ?? null,
           linksJson: parsed.links.length > 0 ? JSON.stringify(parsed.links) : null,
-        },
-      })
-      .run();
+        })
+        .onConflictDoUpdate({
+          target: [fileMeta.groupId, fileMeta.path],
+          set: {
+            hash,
+            title: parsed.title ?? null,
+            summary: parsed.summary ?? null,
+            type: parsed.type ?? null,
+            tagsJson: parsed.tags.length > 0 ? JSON.stringify(parsed.tags) : null,
+            workItem: parsed.workItem ?? null,
+            project: parsed.project ?? null,
+            conflictOf: parsed.conflictOf ?? null,
+            conflictBase: parsed.conflictBase ?? null,
+            linksJson: parsed.links.length > 0 ? JSON.stringify(parsed.links) : null,
+          },
+        })
+        .run();
+    });
   } catch (err) {
     deps.log?.warn('file-meta: updateFileMetaFromBlob failed', {
       groupId,

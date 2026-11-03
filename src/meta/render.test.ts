@@ -154,6 +154,13 @@ describe('renderNote', () => {
     expect(html).not.toMatch(/<img[^>]+diagram\.svg/i);
   });
 
+  // M3: protocol-relative URLs must be blocked (allowProtocolRelative: false)
+  it('M3: [x](//evil.com) → no href="//evil.com" in output', () => {
+    const html = renderNote('[click me](//evil.com)', slug, emptyPaths);
+    // allowProtocolRelative: false in SANITIZE_OPTIONS means //evil.com is stripped
+    expect(html).not.toMatch(/href=["']\/\/evil\.com/i);
+  });
+
   it('[x](vbscript:...) → href replaced with #, no vbscript: in output', () => {
     // vbscript: is a dangerous scheme. The transformTags.a in SANITIZE_OPTIONS
     // replaces it with '#'. sanitize-html's allowedSchemes also rejects it.

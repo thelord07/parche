@@ -229,6 +229,78 @@ describe('A2: backfill idempotency + non-blocking', () => {
   }, 60000);
 });
 
+// ---------------------------------------------------------------------------
+// M2: out-of-order extraction race — stale hash must not overwrite fresh meta
+// ---------------------------------------------------------------------------
+describe('M2: updateFileMetaFromBlob — stale extraction does not overwrite fresher result', () => {
+  let dataDir: string;
+
+  beforeEach(async () => {
+    dataDir = await makeTempDataDir();
+  });
+
+  afterEach(async () => {
+    await cleanupDir(dataDir);
+  });
+
+  it('M2: v1 extraction arriving after v2 is already written keeps v2 meta', async () => {
+    const contentV1 = '# Title V1\n\nVersion 1 content.\n';
+    const contentV2 = '# Title V2\n\nVersion 2 content.\n';
+    const hashV1 = 'a'.repeat(64);
+    const hashV2 = 'b'.repeat(64);
+
+    const blobs = new Map([
+      [hashV1, contentV1],
+      [hashV2, contentV2],
+    ]);
+    const storage = makeTestStorage(blobs);
+
+    const app = await makeApp(dataDir);
+    await app.ready();
+    const group = await seedGroupWithDevice(app);
+
+    // Insert a file row with head_hash = hashV2 (v2 is the current head)
+    app.db
+      .insert(files)
+      .values({
+        groupId: group.groupId,
+        path: 'race-test.md',
+        pathKey: 'race-test.md',
+        headHash: hashV2,
+        headSeq: 2,
+      })
+      .run();
+
+    const { updateFileMetaFromBlob } = await import('./file-meta.js');
+
+    // Simulate out-of-order: run v2 extraction first (should write)
+    await updateFileMetaFromBlob({ db: app.db, storage }, group.groupId, 'race-test.md', hashV2);
+
+    // Verify v2 meta was written
+    const metaAfterV2 = app.db
+      .select()
+      .from(fileMeta)
+      .where(eq(fileMeta.groupId, group.groupId))
+      .get();
+    expect(metaAfterV2?.hash).toBe(hashV2);
+    expect(metaAfterV2?.title).toBe('Title V2');
+
+    // Now run v1 extraction (stale — head is still v2 — should be a no-op)
+    await updateFileMetaFromBlob({ db: app.db, storage }, group.groupId, 'race-test.md', hashV1);
+
+    // file_meta must still reflect v2
+    const metaAfterV1 = app.db
+      .select()
+      .from(fileMeta)
+      .where(eq(fileMeta.groupId, group.groupId))
+      .get();
+    expect(metaAfterV1?.hash).toBe(hashV2);
+    expect(metaAfterV1?.title).toBe('Title V2');
+
+    await app.close();
+  });
+});
+
 describe('O2: push-hook meta perf (500 changes)', () => {
   let dataDir: string;
 
