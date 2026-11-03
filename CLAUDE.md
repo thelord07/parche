@@ -80,7 +80,7 @@ src/
     client.ts         # openDb → { db: AppDb, raw: RawDb }
     migrate.ts        # runMigrations(rawDb)
     schema.ts         # tablas drizzle: users, groups, members, devices, invites, files, changes, blobRefs
-    migrations/       # SQL migrations numeradas
+    migrations/       # SQL migrations numeradas — generarlas solo con `drizzle-kit generate`; nunca editar `when` del journal a mano (PARCHE-007A-HOTFIX)
   storage/
     storage-port.ts         # StoragePort interface + error classes
     blob-path.ts            # HASH_RE, isValidHash, blobPath
