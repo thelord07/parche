@@ -88,6 +88,45 @@ active group membership — otherwise `401` (no session) or `404`
 | `GET /conflicts/view?path=…` | Conflict detail: conflict copy + base + current |
 | `GET /topics` | All unique frontmatter tags used in the group |
 | `GET /topics/:tag` | Notes tagged with `:tag` |
+| `GET /members` | Active members list with devices and last-sync timestamp |
+| `POST /members/:userId/role` | Change a member's role (CSRF required) |
+| `POST /members/:userId/remove` | Remove a member; revokes all their devices (CSRF required) |
+| `POST /devices/:deviceId/revoke` | Revoke a device; cuts its sync access immediately (CSRF required) |
+
+#### Members and devices — permission matrix
+
+All mutation endpoints require `Content-Type: application/json` and `X-Parche-CSRF: 1`.
+
+**Change role** (target ∈ `{admin, editor, reader}`; `owner` as target → 400 `invalid_role`):
+
+| actor \ target | owner | admin | editor | reader | self (owner) |
+|---|---|---|---|---|---|
+| **owner** | 409 `last_owner` | ✓ | ✓ | ✓ | 409 `last_owner` |
+| **admin** | 403 | ✓ | ✓ | ✓ | ✓ (can demote) |
+| **editor** | 403 | 403 | 403 | 403 | 403 |
+| **reader** | 403 | 403 | 403 | 403 | 403 |
+
+**Remove member** (also revokes all their active devices in a single transaction):
+
+| actor \ target | owner | admin | editor | reader | self (owner) |
+|---|---|---|---|---|---|
+| **owner** | 409 `last_owner` | ✓ | ✓ | ✓ | 409 `last_owner` |
+| **admin** | 403 | ✓ | ✓ | ✓ | ✓ |
+| **editor** | 403 | 403 | 403 | 403 | 403 |
+| **reader** | 403 | 403 | 403 | 403 | 403 |
+
+**Revoke device** (device owner's role determines permission; self-revoke always allowed):
+
+| actor \ device owner | owner | admin | editor | reader | self (own device) |
+|---|---|---|---|---|---|
+| **owner** | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **admin** | 403 | ✓ | ✓ | ✓ | ✓ |
+| **editor** | 403 | 403 | 403 | 403 | ✓ |
+| **reader** | 403 | 403 | 403 | 403 | ✓ |
+
+**Email visibility rule**: only `owner` and `admin` receive other members' email addresses. `editor` and `reader` only see their own email (omitted from other members' rows, never sent as empty string). Applies to `GET /members`, `GET /summary`, `GET /activity`, and `GET /note`. The viewer's own email is always visible.
+
+**Invariant**: revoking and removing are always `UPDATE`; nothing is ever physically deleted.
 
 **Backlink matching** in `/note` uses suffix resolution: `[[README]]` is considered a backlink from any `*/README.md` in the vault. This is intentionally lax — it avoids requiring full paths in wikilinks at the cost of occasional false positives in vaults with identically named files in different folders.
 

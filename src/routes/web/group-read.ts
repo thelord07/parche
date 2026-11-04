@@ -1,6 +1,8 @@
 import { and, asc, desc, eq, isNotNull, isNull, lt } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
+import { redactEmail } from '../../auth/member-visibility.js';
 import { requireWebGroup } from '../../auth/require-web-group.js';
+import type { WebUser } from '../../auth/web-session.js';
 import { changes, devices, fileMeta, files, groups, members, users } from '../../db/schema.js';
 
 const RL_READ = {
@@ -31,6 +33,7 @@ export async function groupReadRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: [requireWebGroup('read')], ...RL_READ },
     async (request, reply) => {
       const { groupId, slug, role } = request.webGroup!;
+      const webUser = request.webUser as WebUser;
 
       const grp = app.db
         .select({ name: groups.name })
@@ -75,9 +78,14 @@ export async function groupReadRoutes(app: FastifyInstance): Promise<void> {
         .limit(1)
         .get();
 
-      // Active members
+      // Active members — email visible solo para owner/admin (regla de visibilidad B)
       const memberRows = app.db
-        .select({ name: users.name, email: users.email, role: members.role })
+        .select({
+          userId: members.userId,
+          name: users.name,
+          email: users.email,
+          role: members.role,
+        })
         .from(members)
         .innerJoin(users, eq(members.userId, users.id))
         .where(and(eq(members.groupId, groupId), isNull(members.removedAt)))
@@ -89,7 +97,14 @@ export async function groupReadRoutes(app: FastifyInstance): Promise<void> {
         folders,
         conflicts,
         lastChangeAt: lastChange?.at ?? null,
-        members: memberRows.map((m) => ({ name: m.name, email: m.email, role: m.role })),
+        members: memberRows.map((m) => {
+          const visibleEmail = redactEmail(m.email, m.userId, webUser.id, role);
+          return {
+            name: m.name,
+            ...(visibleEmail !== undefined ? { email: visibleEmail } : {}),
+            role: m.role,
+          };
+        }),
       });
     },
   );
@@ -167,6 +182,8 @@ export async function groupReadRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: [requireWebGroup('read')], ...RL_READ },
     async (request, reply) => {
       const { groupId } = request.webGroup!;
+      const viewerRole = request.webGroup!.role;
+      const viewerUserId = (request.webUser as WebUser).id;
 
       const limitRaw = parseInt(request.query.limit ?? '50', 10);
       const limit = Number.isNaN(limitRaw) ? 50 : Math.min(100, Math.max(1, limitRaw));
@@ -242,6 +259,8 @@ export async function groupReadRoutes(app: FastifyInstance): Promise<void> {
         verb: string;
         hash: string | null;
         hashCorto?: string;
+        /** userId solo se usa internamente para la clave de agrupación D7; no se emite. */
+        userId: string;
         user: { name: string; email: string };
         deviceLabel: string;
         at: string;
@@ -351,6 +370,7 @@ export async function groupReadRoutes(app: FastifyInstance): Promise<void> {
               verb: 'renombró',
               hash: pair.createHash,
               hashCorto: pair.createHash.slice(0, 7),
+              userId: pair.tombstoneRow.userId,
               user: {
                 name: pair.tombstoneRow.userName,
                 email: pair.tombstoneRow.userEmail,
@@ -384,6 +404,7 @@ export async function groupReadRoutes(app: FastifyInstance): Promise<void> {
           verb,
           hash: row.hash,
           hashCorto: row.hash?.slice(0, 7),
+          userId: row.userId,
           user: { name: row.userName, email: row.userEmail },
           deviceLabel: row.deviceLabel,
           at: row.at,
@@ -407,7 +428,9 @@ export async function groupReadRoutes(app: FastifyInstance): Promise<void> {
           event.verb !== 'renombró' && event.verb !== 'borró' && event.hash !== null;
 
         if (isGroupable) {
-          const key = `${event.user.email}|${event.path}`;
+          // Usar userId (no email) como clave para que la agrupación sea robusta
+          // independientemente de la visibilidad de email del viewer.
+          const key = `${event.userId}|${event.path}`;
           const lastIdx = lastEventIdx.get(key);
           if (lastIdx !== undefined) {
             const last = events[lastIdx]!;
@@ -422,15 +445,27 @@ export async function groupReadRoutes(app: FastifyInstance): Promise<void> {
 
         events.push({ ...event, count: isGroupable ? 1 : undefined });
         if (isGroupable) {
-          lastEventIdx.set(`${event.user.email}|${event.path}`, events.length - 1);
+          lastEventIdx.set(`${event.userId}|${event.path}`, events.length - 1);
         }
       }
 
       // Stable pagination cursor: min seq consumed on this page (= last row in desc-sorted page)
       const nextBefore = hasMore && page.length > 0 ? page[page.length - 1]?.seq : undefined;
 
+      // Aplicar visibilidad de email: editor/reader no ven emails ajenos en la actividad.
+      // userId se omite del payload final (es solo para agrupación interna D7).
+      const eventsOut = events.map(({ userId: evUserId, user, ...rest }) => ({
+        ...rest,
+        user: {
+          name: user.name,
+          ...(redactEmail(user.email, evUserId, viewerUserId, viewerRole) !== undefined
+            ? { email: user.email }
+            : {}),
+        },
+      }));
+
       return reply.status(200).send({
-        events,
+        events: eventsOut,
         hasMore,
         nextBefore: nextBefore ?? null,
       });

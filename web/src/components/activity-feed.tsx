@@ -36,8 +36,8 @@ function groupByDay(events: ActivityEvent[]): Array<{ day: string; events: Activ
 }
 
 function ActivityRow({ event, slug }: { event: ActivityEvent; slug: string }) {
-  const initial = (event.user.name || event.user.email)[0]?.toUpperCase() ?? '?';
-  const bg = avatarBg(event.user.email);
+  const initial = event.user.name[0]?.toUpperCase() ?? '?';
+  const bg = avatarBg(event.user.email ?? event.user.name);
 
   const notePath = event.verb === 'renombró' && event.renamedTo ? event.renamedTo : event.path;
 

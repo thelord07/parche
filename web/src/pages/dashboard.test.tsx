@@ -54,12 +54,14 @@ describe('DashboardPage', () => {
     await waitFor(() => expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('CYA'));
   });
 
-  it('does NOT render Miembros button (hidden per Joys decision)', async () => {
+  it('renders Miembros link pointing to /g/:slug/miembros (B-FE5)', async () => {
     mockFetch();
     renderDashboard();
     await waitFor(() => screen.getByRole('heading', { level: 1 }));
-    expect(screen.queryByRole('link', { name: /miembros/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /miembros/i })).not.toBeInTheDocument();
+    // The Miembros link is visible for all roles (read access)
+    const miembrosLink = screen.getByRole('link', { name: /miembros/i });
+    expect(miembrosLink).toBeInTheDocument();
+    expect(miembrosLink).toHaveAttribute('href', '/g/cya/miembros');
   });
 
   it('shows conflict pill when conflicts > 0', async () => {

@@ -31,9 +31,9 @@ function MemberAvatars({ members }: { members: SummaryResponse['members'] }) {
     <div style={{ display: 'flex', alignItems: 'center' }}>
       {visible.map((m, idx) => (
         <span
-          key={m.email}
+          key={m.email ?? m.name}
           aria-hidden="true"
-          title={m.name || m.email}
+          title={m.name}
           style={{
             display: 'inline-flex',
             alignItems: 'center',
@@ -43,13 +43,13 @@ function MemberAvatars({ members }: { members: SummaryResponse['members'] }) {
             marginLeft: idx === 0 ? 0 : -4,
             borderRadius: 4,
             border: '1px solid var(--bg)',
-            background: avatarBg(m.email),
+            background: avatarBg(m.email ?? m.name),
             fontFamily: "'JetBrains Mono', monospace",
             fontSize: 11,
             fontWeight: 500,
           }}
         >
-          {(m.name || m.email)[0]?.toUpperCase()}
+          {m.name[0]?.toUpperCase()}
         </span>
       ))}
       {rest > 0 && (
@@ -318,8 +318,27 @@ export function DashboardPage() {
         </div>
 
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12 }}>
-          {/* Member avatars — static, no link (Miembros button hidden per D decision) */}
-          <MemberAvatars members={members} />
+          {/* Member avatars — linked to Miembros page (B-FE5) */}
+          <Link
+            to={`/g/${slug}/miembros`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              textDecoration: 'none',
+            }}
+          >
+            <MemberAvatars members={members} />
+            <span
+              style={{
+                fontSize: 13,
+                color: 'var(--muted)',
+                fontFamily: "'JetBrains Mono', monospace",
+              }}
+            >
+              Miembros
+            </span>
+          </Link>
 
           {isOwnerOrAdmin && (
             <Link

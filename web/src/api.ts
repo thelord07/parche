@@ -66,7 +66,8 @@ export interface SummaryResponse {
   folders: number;
   conflicts: number;
   lastChangeAt: string | null;
-  members: Array<{ name: string; email: string; role: string }>;
+  /** email solo está presente para owner y admin; editor/reader ven solo el propio */
+  members: Array<{ name: string; email?: string; role: string }>;
 }
 
 export interface TreeItem {
@@ -88,7 +89,8 @@ export interface ActivityEvent {
   verb: string;
   hash: string | null;
   hashCorto?: string;
-  user: { name: string; email: string };
+  /** email solo está presente para owner y admin; editor/reader ven solo el propio */
+  user: { name: string; email?: string };
   deviceLabel: string;
   at: string;
   project?: string;
@@ -137,7 +139,8 @@ export interface NoteHead {
   hashShort: string;
   seq: number;
   at: string;
-  user: { name: string; email: string };
+  /** email solo está presente para owner y admin; editor/reader ven solo el propio */
+  user: { name: string; email?: string };
   deviceLabel: string;
 }
 
@@ -199,6 +202,31 @@ export interface ConflictViewResponse {
   original: ConflictFileInfo | null;
   copy: ConflictFileInfo | null;
   diff: DiffEntry[];
+}
+
+// ─── Members types (PARCHE-007-B) ─────────────────────────────────────────────
+
+export interface MemberDevice {
+  id: string;
+  label: string;
+  kind: 'device';
+  lastSeenAt: string | null;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
+export interface MemberRow {
+  user: {
+    id: string;
+    name: string;
+    /** email solo visible para owner/admin; el propio siempre es visible */
+    email?: string;
+  };
+  role: string;
+  joinedAt: string;
+  isYou: boolean;
+  lastSyncAt: string | null;
+  devices: MemberDevice[];
 }
 
 // ─── Topics types ──────────────────────────────────────────────────────────────
@@ -295,6 +323,19 @@ export const api = {
     ),
 
   getTopics: (slug: string) => apiFetch<TopicsResponse>(`/api/web/g/${slug}/topics`, 'GET'),
+
+  // ─── Members (PARCHE-007-B) ─────────────────────────────────────────────────
+
+  getMembers: (slug: string) => apiFetch<MemberRow[]>(`/api/web/g/${slug}/members`, 'GET'),
+
+  changeMemberRole: (slug: string, userId: string, role: string) =>
+    apiFetch<{ ok: boolean }>(`/api/web/g/${slug}/members/${userId}/role`, 'POST', { role }),
+
+  removeMember: (slug: string, userId: string) =>
+    apiFetch<{ ok: boolean }>(`/api/web/g/${slug}/members/${userId}/remove`, 'POST'),
+
+  revokeDevice: (slug: string, deviceId: string) =>
+    apiFetch<{ ok: boolean }>(`/api/web/g/${slug}/devices/${deviceId}/revoke`, 'POST'),
 
   /** Build a raw asset URL (never fetched directly by this module). */
   rawUrl: (slug: string, path: string, seq?: number): string => {

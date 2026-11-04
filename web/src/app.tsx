@@ -5,6 +5,7 @@ import { DashboardPage } from './pages/dashboard.tsx';
 import { EntrarPage } from './pages/entrar.tsx';
 import { InicioPage } from './pages/inicio.tsx';
 import { InvitarPage } from './pages/invitar.tsx';
+import { MiembrosPage } from './pages/miembros.tsx';
 import { NotaPage } from './pages/nota.tsx';
 import { NuevoPage } from './pages/nuevo.tsx';
 import { UnisrsePage } from './pages/unirse.tsx';
@@ -22,6 +23,8 @@ export function App() {
       <Route path="/g/:slug" element={<DashboardPage />} />
       <Route path="/g/:slug/n/*" element={<NotaPage />} />
       <Route path="/g/:slug/c/*" element={<ConflictoPage />} />
+      {/* PARCHE-007-B: members screen */}
+      <Route path="/g/:slug/miembros" element={<MiembrosPage />} />
     </Routes>
   );
 }

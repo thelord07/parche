@@ -25,6 +25,7 @@ import { groupReadRoutes } from './routes/web/group-read.js';
 import { webGroupsRoutes } from './routes/web/groups.js';
 import { webInviteCheckRoutes } from './routes/web/invite-check.js';
 import { webInvitesRoutes } from './routes/web/invites.js';
+import { webMembersRoutes } from './routes/web/members.js';
 import { noteRoutes } from './routes/web/note.js';
 import { topicsRoutes } from './routes/web/topics.js';
 
@@ -161,6 +162,9 @@ export async function buildServer(
     await app.register(noteRoutes, { storage });
     await app.register(conflictRoutes, { storage });
     await app.register(topicsRoutes);
+
+    // Miembros y dispositivos (PARCHE-007-B)
+    await app.register(webMembersRoutes);
   }
 
   // -------------------------------------------------------------------------
