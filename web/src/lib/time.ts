@@ -10,7 +10,10 @@ export function timeAgo(iso: string | null | undefined): string {
   if (diff < 60) return `hace ${diff} s`;
   if (diff < 3600) return `hace ${Math.floor(diff / 60)} min`;
   if (diff < 86400) return `hace ${Math.floor(diff / 3600)} h`;
-  if (diff < 7 * 86400) return `hace ${Math.floor(diff / 86400)} días`;
+  if (diff < 7 * 86400) {
+    const days = Math.floor(diff / 86400);
+    return `hace ${days} ${days === 1 ? 'día' : 'días'}`;
+  }
 
   const d = new Date(iso);
   return d.toLocaleDateString('es', { day: 'numeric', month: 'short', year: 'numeric' });

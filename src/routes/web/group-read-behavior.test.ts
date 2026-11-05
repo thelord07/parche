@@ -942,3 +942,233 @@ describe('GET /api/web/g/:slug/activity — behavior', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regla de email: redactEmail se aplica en /summary, /activity y /note
+// Mutation proof: si se elimina la llamada a redactEmail, estos tests fallan.
+// ---------------------------------------------------------------------------
+
+async function setupEmailVisibility() {
+  const dataDir = await makeTempDataDir();
+  const { webDir, cleanup: webCleanup } = await withWebFixture();
+  const app = await makeApp(dataDir, {}, { webDir });
+  await app.ready();
+
+  // Owner via CLI (tiene dispositivo, necesario para seedear changes)
+  const owner = await seedGroupWithDevice(app, {
+    slug: 'email-vis',
+    ownerEmail: 'owner@ev.test',
+    ownerName: 'Owner',
+  });
+
+  // Owner como web user (para sesión web)
+  const ownerWebUser = seedWebUser(app, { email: 'owner@ev.test', name: 'Owner' });
+
+  // Otros roles
+  const adminUser = seedWebUser(app, { email: 'admin@ev.test', name: 'Admin' });
+  const editorUser = seedWebUser(app, { email: 'editor@ev.test', name: 'Editor' });
+  const readerUser = seedWebUser(app, { email: 'reader@ev.test', name: 'Reader' });
+
+  seedMember(app, { groupSlug: 'email-vis', userId: adminUser.userId, role: 'admin' });
+  seedMember(app, { groupSlug: 'email-vis', userId: editorUser.userId, role: 'editor' });
+  seedMember(app, { groupSlug: 'email-vis', userId: readerUser.userId, role: 'reader' });
+
+  const ownerSession = seedWebSession(app, ownerWebUser.userId);
+  const adminSession = seedWebSession(app, adminUser.userId);
+  const editorSession = seedWebSession(app, editorUser.userId);
+  const readerSession = seedWebSession(app, readerUser.userId);
+
+  // Seedear un fichero con cambio del owner (su email aparece en activity y note head)
+  const at = new Date().toISOString();
+  const hash = sha256hex('owner authored content for email test');
+  seedFile(app, owner.groupId, owner.userId, owner.deviceId, 'owner-note.md', 1, hash, at);
+
+  return {
+    dataDir,
+    webDir,
+    webCleanup,
+    app,
+    owner,
+    ownerWebUser,
+    adminUser,
+    editorUser,
+    readerUser,
+    ownerSession,
+    adminSession,
+    editorSession,
+    readerSession,
+    hash,
+    cleanup: async () => {
+      await app.close();
+      await cleanupDir(dataDir);
+      await webCleanup();
+    },
+  };
+}
+
+describe('Regla de email — /summary, /activity, /note', () => {
+  let ctx: Awaited<ReturnType<typeof setupEmailVisibility>>;
+
+  beforeEach(async () => {
+    ctx = await setupEmailVisibility();
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+  });
+
+  // ── /summary ───────────────────────────────────────────────────────────────
+
+  it('/summary: owner ve emails de todos los miembros', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/summary',
+      cookies: { parche_session: ctx.ownerSession },
+    });
+    expect(res.statusCode).toBe(200);
+    const rawBody = res.body;
+    // Owner ve los emails ajenos
+    expect(rawBody).toContain('admin@ev.test');
+    expect(rawBody).toContain('editor@ev.test');
+    expect(rawBody).toContain('reader@ev.test');
+  });
+
+  it('/summary: admin ve emails de todos los miembros', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/summary',
+      cookies: { parche_session: ctx.adminSession },
+    });
+    expect(res.statusCode).toBe(200);
+    const rawBody = res.body;
+    expect(rawBody).toContain('owner@ev.test');
+    expect(rawBody).toContain('editor@ev.test');
+  });
+
+  it('/summary: editor NO ve emails ajenos pero sí el propio', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/summary',
+      cookies: { parche_session: ctx.editorSession },
+    });
+    expect(res.statusCode).toBe(200);
+    const rawBody = res.body;
+    // Emails ajenos ausentes
+    expect(rawBody).not.toContain('owner@ev.test');
+    expect(rawBody).not.toContain('admin@ev.test');
+    expect(rawBody).not.toContain('reader@ev.test');
+    // Propio sí
+    expect(rawBody).toContain('editor@ev.test');
+  });
+
+  it('/summary: reader NO ve emails ajenos pero sí el propio', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/summary',
+      cookies: { parche_session: ctx.readerSession },
+    });
+    expect(res.statusCode).toBe(200);
+    const rawBody = res.body;
+    expect(rawBody).not.toContain('owner@ev.test');
+    expect(rawBody).not.toContain('admin@ev.test');
+    expect(rawBody).not.toContain('editor@ev.test');
+    expect(rawBody).toContain('reader@ev.test');
+  });
+
+  // ── /activity ──────────────────────────────────────────────────────────────
+
+  it('/activity: owner ve el email del autor del evento', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/activity',
+      cookies: { parche_session: ctx.ownerSession },
+    });
+    expect(res.statusCode).toBe(200);
+    // El evento fue authored por el owner, el owner ve su propio email
+    expect(res.body).toContain('owner@ev.test');
+  });
+
+  it('/activity: admin ve el email del autor del evento', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/activity',
+      cookies: { parche_session: ctx.adminSession },
+    });
+    expect(res.statusCode).toBe(200);
+    // El evento fue authored por el owner; admin lo ve
+    expect(res.body).toContain('owner@ev.test');
+  });
+
+  it('/activity: editor NO ve el email del autor ajeno', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/activity',
+      cookies: { parche_session: ctx.editorSession },
+    });
+    expect(res.statusCode).toBe(200);
+    // El evento fue authored por el owner; editor no lo ve
+    expect(res.body).not.toContain('owner@ev.test');
+    // Verificar que el evento existe (name sí aparece, solo el email falta)
+    const { events } = res.json<{ events: Array<{ user: { name: string; email?: string } }> }>();
+    const ev = events.find((e) => e.user.name === 'Owner');
+    expect(ev).toBeDefined();
+    expect(ev?.user.email).toBeUndefined();
+  });
+
+  it('/activity: reader NO ve el email del autor ajeno', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/activity',
+      cookies: { parche_session: ctx.readerSession },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain('owner@ev.test');
+  });
+
+  // ── /note ──────────────────────────────────────────────────────────────────
+
+  it('/note: owner ve el email del último autor', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/note?path=owner-note.md',
+      cookies: { parche_session: ctx.ownerSession },
+    });
+    expect(res.statusCode).toBe(200);
+    // Owner authored the note → owner sees their own email in head.user
+    expect(res.body).toContain('owner@ev.test');
+  });
+
+  it('/note: admin ve el email del último autor', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/note?path=owner-note.md',
+      cookies: { parche_session: ctx.adminSession },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('owner@ev.test');
+  });
+
+  it('/note: editor NO ve el email del último autor ajeno', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/note?path=owner-note.md',
+      cookies: { parche_session: ctx.editorSession },
+    });
+    expect(res.statusCode).toBe(200);
+    // Note authored by owner → editor does not see owner's email
+    expect(res.body).not.toContain('owner@ev.test');
+    const body = res.json<{ head: { user: { name: string; email?: string } } | null }>();
+    expect(body.head?.user.name).toBe('Owner');
+    expect(body.head?.user.email).toBeUndefined();
+  });
+
+  it('/note: reader NO ve el email del último autor ajeno', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/email-vis/note?path=owner-note.md',
+      cookies: { parche_session: ctx.readerSession },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain('owner@ev.test');
+  });
+});

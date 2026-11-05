@@ -1,7 +1,9 @@
 import { diffLines } from '@chamba/core';
 import { and, desc, eq, isNotNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
+import { redactEmail } from '../../auth/member-visibility.js';
 import { requireWebGroup } from '../../auth/require-web-group.js';
+import type { WebUser } from '../../auth/web-session.js';
 import { blobRefs, changes, devices, fileMeta, files, users } from '../../db/schema.js';
 import { pairLineDiff } from '../../meta/diff.js';
 import { updateFileMetaFromBlob } from '../../meta/file-meta.js';
@@ -84,6 +86,8 @@ export async function noteRoutes(app: FastifyInstance, opts: NoteRouteOpts): Pro
     { preHandler: [requireWebGroup('read')], ...RL_READ },
     async (request, reply) => {
       const { groupId, slug } = request.webGroup!;
+      const viewerRole = request.webGroup!.role;
+      const viewerUserId = (request.webUser as WebUser).id;
       const path = request.query.path ?? '';
 
       if (!isSafePath(path)) {
@@ -105,6 +109,7 @@ export async function noteRoutes(app: FastifyInstance, opts: NoteRouteOpts): Pro
         .select({
           seq: changes.seq,
           at: changes.at,
+          userId: changes.userId,
           userName: users.name,
           userEmail: users.email,
           deviceLabel: devices.label,
@@ -242,7 +247,17 @@ export async function noteRoutes(app: FastifyInstance, opts: NoteRouteOpts): Pro
               hashShort: fileRow.headHash.slice(0, 7),
               seq: headChange.seq,
               at: headChange.at,
-              user: { name: headChange.userName, email: headChange.userEmail },
+              user: {
+                name: headChange.userName,
+                ...(redactEmail(
+                  headChange.userEmail,
+                  headChange.userId,
+                  viewerUserId,
+                  viewerRole,
+                ) !== undefined
+                  ? { email: headChange.userEmail }
+                  : {}),
+              },
               deviceLabel: headChange.deviceLabel,
             }
           : null,
