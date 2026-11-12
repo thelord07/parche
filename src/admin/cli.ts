@@ -12,6 +12,8 @@
  *   revoke-invite   --group --code
  *   create-device   --group --email [--label]
  *   backup-db       <dest>
+ *   reindex-meta
+ *   scan-secrets
  */
 import { parseArgs } from 'node:util';
 import { loadConfig } from '../config.js';
@@ -26,6 +28,7 @@ import {
   reindexMeta,
   revokeDevice,
   revokeInvite,
+  scanSecrets,
 } from './commands.js';
 
 async function main(): Promise<void> {
@@ -33,7 +36,7 @@ async function main(): Promise<void> {
   if (!command) {
     process.stderr.write(
       'Usage: parche-admin <command> [options]\n' +
-        'Commands: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device, backup-db, reindex-meta\n',
+        'Commands: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device, backup-db, reindex-meta, scan-secrets\n',
     );
     process.exit(1);
   }
@@ -175,6 +178,13 @@ async function main(): Promise<void> {
         break;
       }
 
+      case 'scan-secrets': {
+        const { FilesystemStorage } = await import('../storage/filesystem-storage.js');
+        const storage = new FilesystemStorage(config.dataDir, config.maxBlobBytes);
+        await scanSecrets(db, storage);
+        break;
+      }
+
       case 'backup-db': {
         const dest = process.argv[3];
         if (!dest || dest.trim() === '') {
@@ -190,7 +200,7 @@ async function main(): Promise<void> {
       default: {
         throw new Error(
           `Unknown command '${command}'. ` +
-            'Available: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device, backup-db, reindex-meta',
+            'Available: create-group, create-invite, list-members, revoke-device, revoke-invite, create-device, backup-db, reindex-meta, scan-secrets',
         );
       }
     }

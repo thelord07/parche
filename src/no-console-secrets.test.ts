@@ -13,8 +13,9 @@ import { describe, expect, it } from 'vitest';
 
 const SRC_DIR = new URL('.', import.meta.url).pathname;
 
-// Directories whose code touches magic-link tokens, session secrets or invite codes.
-const SECRET_HANDLING_DIRS = ['auth', 'mail', 'routes', 'admin'];
+// Directories whose code touches magic-link tokens, session secrets, invite
+// codes, or (PARCHE-012) secret-scan findings.
+const SECRET_HANDLING_DIRS = ['auth', 'mail', 'routes', 'admin', 'secrets', 'meta'];
 
 // Must stay empty. `admin/cli.ts` prints the owner token / invite code once by design
 // (PARCHE-003), but through `process.stdout.write`, not `console.*`.

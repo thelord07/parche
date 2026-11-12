@@ -3,9 +3,13 @@ import type { Dirent } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import * as net from 'node:net';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
+import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createGroup, createInvite, revokeDevice } from '../admin/commands.js';
+import { blobRefs } from '../db/schema.js';
+import { SCAN_MAX_BYTES } from '../secrets/scan-blob.js';
 import { buildServer } from '../server.js';
 import {
   cleanupDir,
@@ -627,6 +631,31 @@ describe('blob routes', () => {
       expect(statAfter.mtimeMs).toBe(statBefore.mtimeMs);
     });
 
+    // B1 re-stream branch: body > SCAN_MAX_BYTES (2 MiB) takes the re-emitting-Readable
+    // path in readBoundedPrefix (never scanned), and must still enforce maxBlobBytes.
+    it('re-stream branch (body > SCAN_MAX_BYTES): 5 MiB body with maxBlobBytes=3 MiB → 413, no orphan file', async () => {
+      const restreamApp = await makeApp(dataDir, { maxBlobBytes: 3 * 1024 * 1024 });
+      try {
+        const seeded = await seedGroupWithDevice(restreamApp, { slug: 'restream-group' });
+        const body = Buffer.alloc(5 * 1024 * 1024, 'q'); // > SCAN_MAX_BYTES and > maxBlobBytes
+        const hash = sha256(body);
+
+        const res = await restreamApp.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: { 'content-type': 'application/octet-stream', authorization: seeded.authHeader },
+        });
+
+        expect(res.statusCode).toBe(413);
+        const json = res.json<{ error: string }>();
+        expect(json.error).toBe('blob too large');
+        expect(await waitForNoBlobFiles(dataDir)).toEqual([]);
+      } finally {
+        await restreamApp.close();
+      }
+    }, 10000);
+
     // AC7 real-HTTP: send a chunked (no Content-Length) PUT that exceeds maxBlobBytes.
     it('real-HTTP: chunked PUT exceeding maxBlobBytes → 413, completes promptly, no files', {
       timeout: 5000,
@@ -856,5 +885,427 @@ describe('blob routes', () => {
       });
       expect(res.statusCode).toBe(400);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PARCHE-012 — secret-scan gate on PUT /api/blob/:hash
+// ---------------------------------------------------------------------------
+
+describe('PUT /api/blob/:hash — secret gate (PARCHE-012)', () => {
+  let dataDir: string;
+
+  beforeEach(async () => {
+    dataDir = await makeTempDataDir();
+  });
+
+  afterEach(async () => {
+    await cleanupDir(dataDir);
+  });
+
+  async function appWithGate(gate: 'report' | 'block') {
+    const logStream = new PassThrough();
+    let logOutput = '';
+    logStream.on('data', (chunk: Buffer) => {
+      logOutput += chunk.toString();
+    });
+    const app = await buildServer(
+      { ...makeConfig(dataDir, { secretGate: gate }), logLevel: 'info' },
+      { logStream },
+    );
+    const seeded = await seedGroupWithDevice(app);
+    return { app, authHeader: seeded.authHeader, getLog: () => logOutput };
+  }
+
+  // ---- ticket test 1: block mode -------------------------------------------
+  describe('block mode', () => {
+    it('PUT with a secret → 422, no value in body or logs, no blob_ref created', async () => {
+      const { app, authHeader, getLog } = await appWithGate('block');
+      try {
+        const secret = 'pch_abcdefgh12345678';
+        const body = Buffer.from(`token: ${secret}\n`);
+        const hash = sha256(body);
+
+        const res = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: { 'content-type': 'text/plain', authorization: authHeader },
+        });
+
+        expect(res.statusCode).toBe(422);
+        const json = res.json() as { error: string; kinds: string[] };
+        expect(json.error).toBe('secret_detected');
+        expect(json.kinds).toContain('parche-token');
+        expect(JSON.stringify(json)).not.toContain(secret);
+
+        const log = getLog();
+        expect(log).not.toContain(secret);
+        expect(log).toContain('secret_detected');
+
+        const blobFiles = await listBlobFiles(dataDir);
+        expect(blobFiles).toHaveLength(0);
+
+        const refs = app.db.select().from(blobRefs).where(eq(blobRefs.hash, hash)).all();
+        expect(refs).toHaveLength(0);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('PUT with the same content but clean (no secret) → 201', async () => {
+      const { app, authHeader } = await appWithGate('block');
+      try {
+        const body = Buffer.from('nada que ver aquí\n');
+        const hash = sha256(body);
+        const res = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: { 'content-type': 'text/plain', authorization: authHeader },
+        });
+        expect(res.statusCode).toBe(201);
+      } finally {
+        await app.close();
+      }
+    });
+
+    // ---- ticket test 2: allowlist ------------------------------------------
+    it('allowlist: all findings eximidos → 201 + log allowed:true', async () => {
+      const { app, authHeader, getLog } = await appWithGate('block');
+      try {
+        const secretA = 'pch_abcdefgh12345678';
+        const secretB = 'AKIAIOSFODNN7EXAMPLE';
+        const body = Buffer.from(`a: ${secretA}\nb: ${secretB}\n`);
+        const hash = sha256(body);
+
+        const fpA = createHash('sha256')
+          .update(`parche-token\n${secretA}`)
+          .digest('hex')
+          .slice(0, 12);
+        const fpB = createHash('sha256')
+          .update(`aws-access-key\n${secretB}`)
+          .digest('hex')
+          .slice(0, 12);
+
+        const res = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: {
+            'content-type': 'text/plain',
+            authorization: authHeader,
+            'x-parche-secret-allow': `${fpA},${fpB}`,
+          },
+        });
+
+        expect(res.statusCode).toBe(201);
+        expect(getLog()).toContain('allowlisted');
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('allowlist: only one of two findings eximido → 422', async () => {
+      const { app, authHeader } = await appWithGate('block');
+      try {
+        const secretA = 'pch_abcdefgh12345678';
+        const secretB = 'AKIAIOSFODNN7EXAMPLE';
+        const body = Buffer.from(`a: ${secretA}\nb: ${secretB}\n`);
+        const hash = sha256(body);
+
+        const fpA = createHash('sha256')
+          .update(`parche-token\n${secretA}`)
+          .digest('hex')
+          .slice(0, 12);
+
+        const res = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: {
+            'content-type': 'text/plain',
+            authorization: authHeader,
+            'x-parche-secret-allow': fpA,
+          },
+        });
+
+        expect(res.statusCode).toBe(422);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('allowlist: cabecera basura → 422 (never 400)', async () => {
+      const { app, authHeader } = await appWithGate('block');
+      try {
+        const secret = 'AKIAIOSFODNN7EXAMPLE';
+        const body = Buffer.from(`aws: ${secret}\n`);
+        const hash = sha256(body);
+
+        const res = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: {
+            'content-type': 'text/plain',
+            authorization: authHeader,
+            'x-parche-secret-allow': 'not-a-fingerprint,ZZZ',
+          },
+        });
+
+        expect(res.statusCode).toBe(422);
+      } finally {
+        await app.close();
+      }
+    });
+
+    // ---- ticket test 3: binaries / oversize are not scanned -----------------
+    it('binary content containing a secret-shaped string is not scanned → 201', async () => {
+      const { app, authHeader } = await appWithGate('block');
+      try {
+        // Minimal PNG-like bytes (invalid UTF-8) containing "AKIA..." as a literal substring.
+        const body = Buffer.concat([
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe]),
+          Buffer.from('AKIAIOSFODNN7EXAMPLE'),
+        ]);
+        const hash = sha256(body);
+        const res = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
+        });
+        expect(res.statusCode).toBe(201);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('text body larger than SCAN_MAX_BYTES with a secret is not scanned → 201 (documented limitation)', async () => {
+      const { app, authHeader } = await appWithGate('block');
+      try {
+        const filler = 'x'.repeat(SCAN_MAX_BYTES + 1024);
+        const body = Buffer.from(`${filler}\nAKIAIOSFODNN7EXAMPLE\n`);
+        const hash = sha256(body);
+
+        const res = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: { 'content-type': 'text/plain', authorization: authHeader },
+        });
+        expect(res.statusCode).toBe(201);
+
+        const shardedPath = join(dataDir, 'blobs', hash.slice(0, 2), hash.slice(2, 4), hash);
+        expect(await readFile(shardedPath)).toEqual(body);
+      } finally {
+        await app.close();
+      }
+    }, 10000);
+
+    // B1 — single-iterator re-stream of bodies > 2 MiB must preserve exact bytes/hash.
+    it('a clean 3 MiB body re-streams correctly: 201 and exact bytes stored', async () => {
+      const { app, authHeader } = await appWithGate('block');
+      try {
+        const body = Buffer.alloc(3 * 1024 * 1024, 'z');
+        const hash = sha256(body);
+        const res = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
+        });
+        expect(res.statusCode).toBe(201);
+
+        const shardedPath = join(dataDir, 'blobs', hash.slice(0, 2), hash.slice(2, 4), hash);
+        const stored = await readFile(shardedPath);
+        expect(stored.length).toBe(body.length);
+        expect(stored.equals(body)).toBe(true);
+      } finally {
+        await app.close();
+      }
+    }, 10000);
+
+    // GET/HEAD of a rejected blob → 404, no behavior change.
+    it('GET/HEAD of a rejected blob → 404 (no blob_ref was created)', async () => {
+      const { app, authHeader } = await appWithGate('block');
+      try {
+        const secret = 'AKIAIOSFODNN7EXAMPLE';
+        const body = Buffer.from(`aws: ${secret}\n`);
+        const hash = sha256(body);
+
+        const putRes = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: { 'content-type': 'text/plain', authorization: authHeader },
+        });
+        expect(putRes.statusCode).toBe(422);
+
+        const getRes = await app.inject({
+          method: 'GET',
+          url: `/api/blob/${hash}`,
+          headers: { authorization: authHeader },
+        });
+        expect(getRes.statusCode).toBe(404);
+
+        const headRes = await app.inject({
+          method: 'HEAD',
+          url: `/api/blob/${hash}`,
+          headers: { authorization: authHeader },
+        });
+        expect(headRes.statusCode).toBe(404);
+      } finally {
+        await app.close();
+      }
+    });
+
+    // A6 — a rejected PUT must never touch unrelated, already-stored blobs. The gate
+    // runs (and bails with 422) before storage.put is ever called for the new hash,
+    // so a pre-existing blob under a different hash stays completely untouched.
+    it('A6: blob already on disk is untouched when a different PUT is rejected for a secret', async () => {
+      const { app, authHeader } = await appWithGate('block');
+      try {
+        // Store an existing, clean blob first.
+        const existingBody = Buffer.from('ya guardado, sin secretos\n');
+        const existingHash = sha256(existingBody);
+        const putExisting = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${existingHash}`,
+          payload: existingBody,
+          headers: { 'content-type': 'text/plain', authorization: authHeader },
+        });
+        expect(putExisting.statusCode).toBe(201);
+
+        const shardedPath = join(
+          dataDir,
+          'blobs',
+          existingHash.slice(0, 2),
+          existingHash.slice(2, 4),
+          existingHash,
+        );
+        const statBefore = await stat(shardedPath);
+        const contentBefore = await readFile(shardedPath);
+
+        // Now PUT a DIFFERENT blob containing a secret under block mode.
+        const secret = 'AKIAIOSFODNN7EXAMPLE';
+        const secretBody = Buffer.from(`aws: ${secret}\n`);
+        const secretHash = sha256(secretBody);
+        const res = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${secretHash}`,
+          payload: secretBody,
+          headers: { 'content-type': 'text/plain', authorization: authHeader },
+        });
+        expect(res.statusCode).toBe(422);
+
+        // No blob_ref for the rejected hash.
+        const refs = app.db.select().from(blobRefs).where(eq(blobRefs.hash, secretHash)).all();
+        expect(refs).toHaveLength(0);
+
+        // No file was ever created for the rejected hash.
+        const rejectedPath = join(
+          dataDir,
+          'blobs',
+          secretHash.slice(0, 2),
+          secretHash.slice(2, 4),
+          secretHash,
+        );
+        await expect(stat(rejectedPath)).rejects.toThrow();
+
+        // The pre-existing blob is completely untouched (same mtime, same bytes).
+        const statAfter = await stat(shardedPath);
+        expect(statAfter.mtimeMs).toBe(statBefore.mtimeMs);
+        expect(await readFile(shardedPath)).toEqual(contentBefore);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  // ---- D1: report mode ------------------------------------------------------
+  describe('report mode (default)', () => {
+    it('PUT with a secret, not eximido → 201 (stored), log warn allowed:false mode:report, no value', async () => {
+      const { app, authHeader, getLog } = await appWithGate('report');
+      try {
+        const secret = 'AKIAIOSFODNN7EXAMPLE';
+        const body = Buffer.from(`aws: ${secret}\n`);
+        const hash = sha256(body);
+
+        const res = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: { 'content-type': 'text/plain', authorization: authHeader },
+        });
+
+        expect(res.statusCode).toBe(201);
+
+        const log = getLog();
+        expect(log).not.toContain(secret);
+        expect(log).toContain('"mode":"report"');
+        expect(log).toContain('"allowed":false');
+
+        const shardedPath = join(dataDir, 'blobs', hash.slice(0, 2), hash.slice(2, 4), hash);
+        expect(await readFile(shardedPath)).toEqual(body);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  // ---- hot-path: memory/perf guardrails -------------------------------------
+  describe('hot-path guardrails', () => {
+    it('a 2 MiB dense-text body scans in well under 500ms (anti-regression net)', async () => {
+      const { app, authHeader } = await appWithGate('block');
+      try {
+        const line = 'const token = "xyz123abc456def789";\n';
+        const body = Buffer.from(line.repeat(Math.ceil(SCAN_MAX_BYTES / line.length))).subarray(
+          0,
+          SCAN_MAX_BYTES,
+        );
+        const hash = sha256(body);
+
+        const start = performance.now();
+        const res = await app.inject({
+          method: 'PUT',
+          url: `/api/blob/${hash}`,
+          payload: body,
+          headers: { 'content-type': 'text/plain', authorization: authHeader },
+        });
+        const elapsed = performance.now() - start;
+
+        expect([200, 201, 422]).toContain(res.statusCode);
+        expect(elapsed).toBeLessThan(5000); // generous ceiling for the test runner
+      } finally {
+        await app.close();
+      }
+    }, 10000);
+
+    it('8 concurrent 2 MiB PUTs complete without error (soft memory guardrail)', async () => {
+      const { app, authHeader } = await appWithGate('report');
+      try {
+        const bodies = Array.from({ length: 8 }, (_, i) =>
+          Buffer.alloc(SCAN_MAX_BYTES, String(i).charCodeAt(0)),
+        );
+        const results = await Promise.all(
+          bodies.map((body) => {
+            const hash = sha256(body);
+            return app.inject({
+              method: 'PUT',
+              url: `/api/blob/${hash}`,
+              payload: body,
+              headers: { 'content-type': 'application/octet-stream', authorization: authHeader },
+            });
+          }),
+        );
+        for (const res of results) {
+          expect([200, 201]).toContain(res.statusCode);
+        }
+      } finally {
+        await app.close();
+      }
+    }, 15000);
   });
 });

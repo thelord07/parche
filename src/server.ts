@@ -27,9 +27,12 @@ import { webInviteCheckRoutes } from './routes/web/invite-check.js';
 import { webInvitesRoutes } from './routes/web/invites.js';
 import { webMembersRoutes } from './routes/web/members.js';
 import { noteRoutes } from './routes/web/note.js';
+import { secretsRoutes } from './routes/web/secrets.js';
 import { topicsRoutes } from './routes/web/topics.js';
+import { startSecretScanBackground } from './secrets/backfill.js';
+import type { SecretScanStatus } from './secrets/scan-status.js';
 
-export type { MetaStatus };
+export type { MetaStatus, SecretScanStatus };
 
 // ---------------------------------------------------------------------------
 // Fastify instance decoration typings
@@ -40,6 +43,7 @@ declare module 'fastify' {
     db: AppDb;
     rawDb: RawDb;
     metaStatus: MetaStatus;
+    secretScanStatus: SecretScanStatus;
   }
 }
 
@@ -101,6 +105,10 @@ export async function buildServer(
   const metaStatus: MetaStatus = { backfill: 'idle' };
   app.decorate('metaStatus', metaStatus);
 
+  // Decorate with secretScanStatus — tracks the secret-scan backfill state (PARCHE-012)
+  const secretScanStatus: SecretScanStatus = { scan: 'idle' };
+  app.decorate('secretScanStatus', secretScanStatus);
+
   // Close the database when the Fastify server closes so tests can clean
   // up their temp directories without leaving open WAL/SHM handles.
   app.addHook('onClose', async (_instance) => {
@@ -137,7 +145,7 @@ export async function buildServer(
   });
 
   await app.register(healthRoutes);
-  await app.register(blobRoutes, { storage });
+  await app.register(blobRoutes, { storage, secretGate: config.secretGate });
   await app.register(joinRoutes);
   await app.register(changesRoutes);
   await app.register(pushRoutes, { storage });
@@ -165,6 +173,9 @@ export async function buildServer(
 
     // Miembros y dispositivos (PARCHE-007-B)
     await app.register(webMembersRoutes);
+
+    // Red de seguridad de secretos — aviso + ack (PARCHE-012)
+    await app.register(secretsRoutes);
   }
 
   // -------------------------------------------------------------------------
@@ -226,6 +237,14 @@ export async function buildServer(
     db,
     storage,
     metaStatus,
+    log: app.log as { warn(m: string, o?: unknown): void; info(m: string, o?: unknown): void },
+  });
+
+  // Start the secret-scan backfill in background — does not block listen() (PARCHE-012)
+  startSecretScanBackground({
+    db,
+    storage,
+    secretScanStatus,
     log: app.log as { warn(m: string, o?: unknown): void; info(m: string, o?: unknown): void },
   });
 

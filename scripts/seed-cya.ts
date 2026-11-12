@@ -34,7 +34,16 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { generateDeviceToken, hashToken } from '../src/auth/tokens.js';
 import { openDb } from '../src/db/client.js';
 import { runMigrations } from '../src/db/migrate.js';
-import { blobRefs, changes, devices, files, groups, members, users } from '../src/db/schema.js';
+import {
+  blobRefs,
+  changes,
+  devices,
+  files,
+  groups,
+  members,
+  secretFindings,
+  users,
+} from '../src/db/schema.js';
 import { newId } from '../src/ids.js';
 
 // ---------------------------------------------------------------------------
@@ -1053,6 +1062,29 @@ form-action 'self'
 \`unsafe-inline\` en style-src es necesario para los estilos del SPA (pendiente de refactor).
 `,
   },
+  // PARCHE-012 — valores de juguete (forma real, nunca secretos vivos) para que
+  // el escaneo de servidor tenga algo que reportar en el dashboard (GWT-1/GWT-7).
+  {
+    path: 'security/credenciales-viejas.md',
+    content: `---
+title: Credenciales viejas (de juguete, para QA)
+tags: [tema/seguridad]
+project: security-audit
+---
+
+# Credenciales viejas — SOLO valores de juguete para QA
+
+Esta nota existe a propósito para que el escaneo de secretos del servidor
+(PARCHE-012) tenga algo que reportar en el dashboard. Los valores de abajo
+son de juguete (forma real, nunca una credencial viva):
+
+- AWS access key de ejemplo: AKIAIOSFODNN7EXAMPLE
+- Token de parche de ejemplo: pch_qaDemoToken1234567890
+
+Quitar el valor de esta nota no lo borra del historial: la acción correcta
+es rotar la credencial (en este caso, nada que rotar — son valores de juguete).
+`,
+  },
 ];
 
 // Conflict copy content (divergente del original)
@@ -1619,6 +1651,69 @@ Ver [[auth/flujo-login]].
   } else {
     process.stdout.write(`[seed-cya] '${flujoLoginPath}' v3 ya existe, saltando\n`);
   }
+
+  // -----------------------------------------------------------------------
+  // 11. PARCHE-012 — nota con una credencial ya rotada (head limpio) + un
+  //     hallazgo resuelto-sin-acuse sembrado directo (simula historial: la
+  //     nota tuvo un secreto en una versión anterior que ya no está en el
+  //     head vivo). Solo INSERT, idempotente por el índice único
+  //     (group_id,path,kind,fingerprint) — nunca UPDATE/DELETE de datos reales.
+  //     Da contenido a AMBAS listas del dashboard (open + pendingRotation)
+  //     para las capturas de QA (GWT-1).
+  // -----------------------------------------------------------------------
+  const ROTATED_PATH = 'security/credencial-rotada.md';
+  const rotatedContent = `---
+title: Credencial rotada (ejemplo de QA)
+tags: [tema/seguridad]
+---
+
+# Credencial rotada
+
+Esta nota documentaba una credencial de prueba que ya fue rotada: el valor
+ya no está en la versión actual, pero el hallazgo queda en el historial
+hasta que alguien lo acuse con "Ya roté la credencial".
+`;
+
+  if (!noteExists(ROTATED_PATH)) {
+    await seedNote(
+      db,
+      blobsDir,
+      groupId,
+      qaDevice.userId,
+      qaDevice.deviceId,
+      ROTATED_PATH,
+      rotatedContent,
+      nextSeq(),
+      new Date().toISOString(),
+    );
+    process.stdout.write(`[seed-cya] '${ROTATED_PATH}' sembrada\n`);
+  } else {
+    process.stdout.write(`[seed-cya] '${ROTATED_PATH}' ya existe, saltando\n`);
+  }
+
+  const rotatedKind = 'aws-access-key';
+  const rotatedToyValue = 'AKIAEXAMPLEOLDKEY123'; // valor de juguete — nunca una credencial viva
+  const rotatedFingerprint = sha256hex(`${rotatedKind}\n${rotatedToyValue}`).slice(0, 12);
+  const foundAtPast = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+  const resolvedAtPast = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+
+  db.insert(secretFindings)
+    .values({
+      groupId,
+      path: ROTATED_PATH,
+      hash: sha256hex(Buffer.from(rotatedContent, 'utf8')),
+      kind: rotatedKind,
+      fingerprint: rotatedFingerprint,
+      foundAt: foundAtPast,
+      resolvedAt: resolvedAtPast,
+      acknowledgedAt: null,
+      acknowledgedBy: null,
+    })
+    .onConflictDoNothing()
+    .run();
+  process.stdout.write(
+    `[seed-cya] hallazgo resuelto-sin-acuse sembrado para '${ROTATED_PATH}' (pendingRotation)\n`,
+  );
 
   raw.close();
   process.stdout.write(`[seed-cya] listo. Total seqs usados: ${seq}\n`);

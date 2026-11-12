@@ -18,6 +18,10 @@ const SUMMARY = {
 const ACTIVITY = { events: [], hasMore: false, nextBefore: null };
 const TOPICS = { nodes: [] };
 const TREE = { path: '', items: [] };
+const EMPTY_SECRETS = {
+  open: { count: 0, items: [], hasMore: false, total: 0 },
+  pendingRotation: { count: 0, items: [], hasMore: false, total: 0 },
+};
 
 function renderDashboard() {
   return render(
@@ -43,6 +47,7 @@ describe('DashboardPage', () => {
       else if (url.includes('/summary')) response = summary;
       else if (url.includes('/activity')) response = activity;
       else if (url.includes('/topics')) response = TOPICS;
+      else if (url.includes('/secrets')) response = EMPTY_SECRETS;
       else if (url.includes('/tree')) response = TREE;
       return Promise.resolve({ ok: true, json: async () => response });
     });
@@ -120,6 +125,7 @@ describe('DashboardPage', () => {
         response = activityCallCount === 0 ? activityPage1 : activityPage2;
         activityCallCount++;
       } else if (url.includes('/topics')) response = TOPICS;
+      else if (url.includes('/secrets')) response = EMPTY_SECRETS;
       else if (url.includes('/tree')) response = TREE;
       return Promise.resolve({ ok: true, json: async () => response });
     });
@@ -134,6 +140,230 @@ describe('DashboardPage', () => {
     // The path appears as code in the activity row
     await waitFor(() => expect(screen.getByText('db/schema.md')).toBeInTheDocument());
     expect(screen.queryByRole('button', { name: /ver más/i })).not.toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------------
+  // PARCHE-012 — secrets banner
+  // ---------------------------------------------------------------------------
+
+  const TWO_FINDINGS_SECRETS = {
+    open: {
+      count: 1,
+      items: [
+        {
+          id: 1,
+          path: 'security/credenciales-viejas.md',
+          kind: 'aws-access-key',
+          since: new Date().toISOString(),
+        },
+        {
+          id: 2,
+          path: 'security/credenciales-viejas.md',
+          kind: 'parche-token',
+          since: new Date().toISOString(),
+        },
+      ],
+      hasMore: false,
+      total: 2,
+    },
+    pendingRotation: { count: 0, items: [], hasMore: false, total: 0 },
+  };
+
+  function mockFetchWithSecrets(role: string, secrets: unknown) {
+    const getSecretsSpy = vi.fn().mockImplementation((url: string) => {
+      let response: unknown = TREE;
+      if (url.includes('/me')) response = ME;
+      else if (url.includes('/summary'))
+        response = { ...SUMMARY, group: { ...SUMMARY.group, role } };
+      else if (url.includes('/activity')) response = ACTIVITY;
+      else if (url.includes('/topics')) response = TOPICS;
+      else if (url.includes('/secrets')) {
+        response = secrets;
+      } else if (url.includes('/tree')) response = TREE;
+      return Promise.resolve({ ok: true, json: async () => response });
+    });
+    global.fetch = getSecretsSpy;
+    return getSecretsSpy;
+  }
+
+  it('owner with 2 findings on 1 note → shows "1 nota con posibles secretos" and 2 rows', async () => {
+    mockFetchWithSecrets('owner', TWO_FINDINGS_SECRETS);
+    renderDashboard();
+    await waitFor(() =>
+      expect(screen.getByText(/1 nota con posibles secretos/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/aws-access-key/)).toBeInTheDocument();
+    expect(screen.getByText(/parche-token/)).toBeInTheDocument();
+    expect(screen.getByText(/rota la credencial/i)).toBeInTheDocument();
+  });
+
+  it('admin → the banner appears too', async () => {
+    mockFetchWithSecrets('admin', TWO_FINDINGS_SECRETS);
+    renderDashboard();
+    await waitFor(() =>
+      expect(screen.getByText(/1 nota con posibles secretos/i)).toBeInTheDocument(),
+    );
+  });
+
+  it('editor → no banner, and /secrets is never fetched', async () => {
+    const spy = mockFetchWithSecrets('editor', TWO_FINDINGS_SECRETS);
+    renderDashboard();
+    await waitFor(() => screen.getByRole('heading', { level: 1 }));
+    expect(screen.queryByText(/posibles secretos/i)).not.toBeInTheDocument();
+    const calledSecrets = spy.mock.calls.some((c) => String(c[0]).includes('/secrets'));
+    expect(calledSecrets).toBe(false);
+  });
+
+  it('reader → no banner, and /secrets is never fetched', async () => {
+    const spy = mockFetchWithSecrets('reader', TWO_FINDINGS_SECRETS);
+    renderDashboard();
+    await waitFor(() => screen.getByRole('heading', { level: 1 }));
+    expect(screen.queryByText(/posibles secretos/i)).not.toBeInTheDocument();
+    const calledSecrets = spy.mock.calls.some((c) => String(c[0]).includes('/secrets'));
+    expect(calledSecrets).toBe(false);
+  });
+
+  it('the rendered DOM never contains a fingerprint-looking value', async () => {
+    mockFetchWithSecrets('owner', TWO_FINDINGS_SECRETS);
+    const { container } = renderDashboard();
+    await waitFor(() =>
+      expect(screen.getByText(/1 nota con posibles secretos/i)).toBeInTheDocument(),
+    );
+    expect(container.innerHTML).not.toMatch(/\bfingerprint\b/i);
+    expect(container.innerHTML).not.toMatch(/"line":/);
+  });
+
+  it('pendingRotation block shows "Pendiente rotar credencial" when there are resolved-but-unacked findings', async () => {
+    const secrets = {
+      open: { count: 0, items: [], hasMore: false, total: 0 },
+      pendingRotation: {
+        count: 1,
+        items: [
+          { id: 3, path: 'rotated.md', kind: 'aws-access-key', since: new Date().toISOString() },
+        ],
+        hasMore: false,
+        total: 1,
+      },
+    };
+    mockFetchWithSecrets('owner', secrets);
+    renderDashboard();
+    await waitFor(() =>
+      expect(screen.getByText(/pendiente rotar credencial/i)).toBeInTheDocument(),
+    );
+  });
+
+  it('shows "y N más…" with the exact remaining count when a list is truncated', async () => {
+    const secrets = {
+      open: {
+        count: 1,
+        items: [
+          { id: 1, path: 'leak.md', kind: 'aws-access-key', since: new Date().toISOString() },
+        ],
+        hasMore: true,
+        total: 5,
+      },
+      pendingRotation: { count: 0, items: [], hasMore: false, total: 0 },
+    };
+    mockFetchWithSecrets('owner', secrets);
+    renderDashboard();
+    // total (5) - items shown (1) = 4 hidden.
+    await waitFor(() => expect(screen.getByText(/y 4 más…/i)).toBeInTheDocument());
+  });
+
+  it('ack on an OPEN finding: POSTs ack, keeps the item visible in `open`, and refetches /secrets', async () => {
+    const secretsBeforeAck = {
+      open: {
+        count: 1,
+        items: [
+          { id: 42, path: 'leak.md', kind: 'aws-access-key', since: new Date().toISOString() },
+        ],
+        hasMore: false,
+        total: 1,
+      },
+      pendingRotation: { count: 0, items: [], hasMore: false, total: 0 },
+    };
+    // After ack, the server still reports it as open (resolved_at IS NULL — acking
+    // an open finding never resolves it) — only counts/total might change elsewhere.
+    const secretsAfterAck = secretsBeforeAck;
+
+    let ackCalled = false;
+    let getSecretsCallCount = 0;
+    global.fetch = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url.includes('/secrets/42/ack')) {
+        ackCalled = true;
+        expect(init?.method).toBe('POST');
+        return Promise.resolve({ ok: true, json: async () => ({ ok: true }) });
+      }
+      let response: unknown = TREE;
+      if (url.includes('/me')) response = ME;
+      else if (url.includes('/summary')) response = SUMMARY;
+      else if (url.includes('/activity')) response = ACTIVITY;
+      else if (url.includes('/topics')) response = TOPICS;
+      else if (url.includes('/secrets')) {
+        getSecretsCallCount++;
+        response = getSecretsCallCount <= 1 ? secretsBeforeAck : secretsAfterAck;
+      } else if (url.includes('/tree')) response = TREE;
+      return Promise.resolve({ ok: true, json: async () => response });
+    });
+
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText('leak.md')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole('button', { name: /ya roté la credencial/i }));
+
+    await waitFor(() => expect(ackCalled).toBe(true));
+    // Refetch: /secrets is called again after the ack (initial load + refetch).
+    await waitFor(() => expect(getSecretsCallCount).toBeGreaterThanOrEqual(2));
+    // Still visible in `open` — an open finding is still a live secret.
+    expect(screen.getByText('leak.md')).toBeInTheDocument();
+  });
+
+  it('ack on a PENDING-ROTATION finding removes it from view', async () => {
+    const secretsBeforeAck = {
+      open: { count: 0, items: [], hasMore: false, total: 0 },
+      pendingRotation: {
+        count: 1,
+        items: [
+          { id: 7, path: 'rotated.md', kind: 'aws-access-key', since: new Date().toISOString() },
+        ],
+        hasMore: false,
+        total: 1,
+      },
+    };
+    // After the ack, the server's pendingRotation query (isNull(acknowledgedAt)) no
+    // longer matches this row — the refetch reflects that.
+    const secretsAfterAck = {
+      open: { count: 0, items: [], hasMore: false, total: 0 },
+      pendingRotation: { count: 0, items: [], hasMore: false, total: 0 },
+    };
+
+    let ackCalled = false;
+    let getSecretsCallCount = 0;
+    global.fetch = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url.includes('/secrets/7/ack')) {
+        ackCalled = true;
+        expect(init?.method).toBe('POST');
+        return Promise.resolve({ ok: true, json: async () => ({ ok: true }) });
+      }
+      let response: unknown = TREE;
+      if (url.includes('/me')) response = ME;
+      else if (url.includes('/summary')) response = SUMMARY;
+      else if (url.includes('/activity')) response = ACTIVITY;
+      else if (url.includes('/topics')) response = TOPICS;
+      else if (url.includes('/secrets')) {
+        getSecretsCallCount++;
+        response = getSecretsCallCount <= 1 ? secretsBeforeAck : secretsAfterAck;
+      } else if (url.includes('/tree')) response = TREE;
+      return Promise.resolve({ ok: true, json: async () => response });
+    });
+
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText('rotated.md')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole('button', { name: /ya roté la credencial/i }));
+
+    await waitFor(() => expect(ackCalled).toBe(true));
+    await waitFor(() => expect(screen.queryByText('rotated.md')).not.toBeInTheDocument());
   });
 
   it('shows 404 state when fetch returns 404', async () => {
@@ -180,6 +410,7 @@ describe('DashboardPage', () => {
       else if (url.includes('/summary')) response = summaryWithConflict;
       else if (url.includes('/activity')) response = ACTIVITY;
       else if (url.includes('/topics')) response = TOPICS;
+      else if (url.includes('/secrets')) response = EMPTY_SECRETS;
       else if (url.includes('/tree')) response = TREE;
       else if (url.includes('/conflicts')) response = conflictRows;
       return Promise.resolve({ ok: true, json: async () => response });
@@ -220,6 +451,7 @@ describe('DashboardPage', () => {
       else if (url.includes('/summary')) response = summaryWithConflicts;
       else if (url.includes('/activity')) response = ACTIVITY;
       else if (url.includes('/topics')) response = TOPICS;
+      else if (url.includes('/secrets')) response = EMPTY_SECRETS;
       else if (url.includes('/tree')) response = TREE;
       else if (url.includes('/conflicts')) response = conflictRows;
       return Promise.resolve({ ok: true, json: async () => response });

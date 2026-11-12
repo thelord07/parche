@@ -20,6 +20,8 @@ const EXPECTED_TABLES = [
   'sessions',
   'magic_links',
   'file_meta',
+  'secret_findings',
+  'secret_scan_state',
 ];
 
 describe('migration files are additive-only', () => {
@@ -97,6 +99,21 @@ describe('migration upgrade path', () => {
     try {
       migrate(drizzle(raw), { migrationsFolder: upTo0001 });
       expect(tableNames(raw)).not.toContain('file_meta');
+
+      runMigrations(raw);
+
+      expect(tableNames(raw)).toEqual([...EXPECTED_TABLES].sort());
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('una base migrada solo hasta 0002 recibe secret_findings y secret_scan_state (PARCHE-012)', () => {
+    const upTo0002 = migrationsCopy(tmp, (entries) => entries.filter((e) => e.idx <= 2));
+    const raw = new Database(':memory:');
+    try {
+      migrate(drizzle(raw), { migrationsFolder: upTo0002 });
+      expect(tableNames(raw)).not.toContain('secret_findings');
 
       runMigrations(raw);
 

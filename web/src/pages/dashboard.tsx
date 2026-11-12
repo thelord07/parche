@@ -9,6 +9,8 @@ import {
   type ActivityEvent,
   api,
   type ConflictRow,
+  type SecretFindingItem,
+  type SecretsResponse,
   type SummaryResponse,
   type TopicsResponse,
 } from '../api.ts';
@@ -152,6 +154,112 @@ function SyncBlock() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// PARCHE-012 — aviso de secretos (solo owner/admin). Nunca renderiza
+// fingerprint, line ni el valor del secreto: solo path · kind · since.
+// ---------------------------------------------------------------------------
+
+function SecretsBanner({
+  title,
+  items,
+  hasMore,
+  total,
+  slug,
+  ariaLabel,
+  onAck,
+}: {
+  title: string;
+  items: SecretFindingItem[];
+  hasMore: boolean;
+  total: number;
+  slug: string;
+  ariaLabel: string;
+  onAck: (id: number) => void;
+}) {
+  if (items.length === 0) return null;
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        padding: '12px 16px',
+        border: '1px solid oklch(0.83 0.11 88 / 0.45)',
+        borderRadius: 6,
+        background: 'oklch(0.83 0.11 88 / 0.06)',
+      }}
+    >
+      <span style={{ fontSize: 14 }}>
+        <strong style={{ fontWeight: 600, color: 'var(--warn-text)' }}>{title}</strong>
+      </span>
+      <span style={{ fontSize: 13, color: 'var(--muted)' }}>
+        Quitar el valor de la nota no lo borra del historial:{' '}
+        <strong style={{ color: 'var(--warn-text)' }}>rota la credencial</strong>.
+      </span>
+      <ul
+        aria-label={ariaLabel}
+        style={{
+          margin: 0,
+          padding: 0,
+          listStyle: 'none',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}
+      >
+        {items.map((item) => (
+          <li
+            key={item.id}
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 8,
+              fontSize: 13,
+            }}
+          >
+            <span>
+              <Link
+                to={`/g/${slug}/n/${item.path}`}
+                style={{ color: 'var(--warn-text)', textDecoration: 'underline' }}
+              >
+                {item.path}
+              </Link>{' '}
+              · {item.kind} · desde <span title={item.since}>{timeAgo(item.since)}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => onAck(item.id)}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                height: 28,
+                padding: '0 10px',
+                borderRadius: 5,
+                border: '1px solid oklch(0.83 0.11 88 / 0.6)',
+                background: 'transparent',
+                color: 'var(--warn-text)',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Ya roté la credencial
+            </button>
+          </li>
+        ))}
+      </ul>
+      {hasMore && (
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+          y {Math.max(total - items.length, 0)} más…
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function DashboardPage() {
   const { slug } = useParams<{ slug: string }>();
   const navigate = useNavigate();
@@ -167,6 +275,7 @@ export function DashboardPage() {
   const [loadingMore, setLoadingMore] = useState(false);
 
   const [conflictRows, setConflictRows] = useState<ConflictRow[]>([]);
+  const [secrets, setSecrets] = useState<SecretsResponse | null>(null);
   const [vaultOpen, setVaultOpen] = useState(false);
   const vaultRef = useRef<HTMLDetailsElement>(null);
 
@@ -191,6 +300,17 @@ export function DashboardPage() {
               // Non-fatal: links stay broken but page still loads
             });
         }
+        // PARCHE-012 — solo owner/admin ven el aviso de secretos; el front ni
+        // llama al endpoint si no lo es (R4).
+        const role = summaryData.group.role;
+        if (role === 'owner' || role === 'admin') {
+          api
+            .getSecrets(slug)
+            .then(setSecrets)
+            .catch(() => {
+              // Non-fatal: the dashboard still loads without the banner
+            });
+        }
       })
       .catch((err: unknown) => {
         const status = (err as { status?: number }).status;
@@ -203,6 +323,37 @@ export function DashboardPage() {
         }
       });
   }, [slug, navigate]);
+
+  const handleAckSecret = async (id: number) => {
+    if (!slug) return;
+    try {
+      await api.ackSecret(slug, id);
+      // Un hallazgo abierto (resolved_at IS NULL) sigue siendo un secreto vivo en el
+      // head actual — el ack no lo cierra, así que debe seguir listado en `open`.
+      // Solo se quita de `pendingRotation` (ya resuelto, solo faltaba el acuse).
+      // Luego se refetchea /secrets para que los counts/total reflejen la verdad del
+      // server en vez de un estado local potencialmente desincronizado.
+      setSecrets((prev) =>
+        prev
+          ? {
+              ...prev,
+              pendingRotation: {
+                ...prev.pendingRotation,
+                items: prev.pendingRotation.items.filter((i) => i.id !== id),
+              },
+            }
+          : prev,
+      );
+      api
+        .getSecrets(slug)
+        .then(setSecrets)
+        .catch(() => {
+          // Non-fatal: the optimistic pendingRotation update above still stands.
+        });
+    } catch {
+      // silent — el ítem se queda visible y la persona puede reintentar
+    }
+  };
 
   const handleLoadMore = async () => {
     if (!slug || !nextBefore || loadingMore) return;
@@ -501,6 +652,30 @@ export function DashboardPage() {
                 Actividad
               </h2>
             </div>
+
+            {/* PARCHE-012 — aviso de secretos (encima del banner de conflictos) */}
+            {secrets && secrets.open.count > 0 && (
+              <SecretsBanner
+                title={`${secrets.open.count} nota${secrets.open.count > 1 ? 's' : ''} con posibles secretos`}
+                items={secrets.open.items}
+                hasMore={secrets.open.hasMore}
+                total={secrets.open.total}
+                slug={slug ?? ''}
+                ariaLabel="Notas con posibles secretos"
+                onAck={handleAckSecret}
+              />
+            )}
+            {secrets && secrets.pendingRotation.count > 0 && (
+              <SecretsBanner
+                title="Pendiente rotar credencial"
+                items={secrets.pendingRotation.items}
+                hasMore={secrets.pendingRotation.hasMore}
+                total={secrets.pendingRotation.total}
+                slug={slug ?? ''}
+                ariaLabel="Notas pendientes de rotar credencial"
+                onAck={handleAckSecret}
+              />
+            )}
 
             {/* Conflict banner */}
             {conflicts > 0 && (

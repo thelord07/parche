@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@chamba/core':
-        specifier: ^1.7.0
-        version: 1.7.0
+        specifier: ^1.15.0
+        version: 1.15.0
       '@fastify/cookie':
         specifier: ^11.1.5
         version: 11.1.5
@@ -282,8 +282,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@chamba/core@1.7.0':
-    resolution: {integrity: sha512-rAPegZbznQFVC56hkbkYkcCpfA++cChbdZAG9haEi0RJDnr8z93HQjaT6wlwgOxgefrAC0BazOfNrXE9RhwklQ==}
+  '@chamba/core@1.15.0':
+    resolution: {integrity: sha512-9+O5j8QxBMZlEzYBulNJAhb7gzJtfRAR6W6XqmcvRMxRGagR0/gaNmjibTsu/QU3CCZKXf0gB80WPWlR5wsMvQ==}
 
   '@csstools/color-helpers@5.1.0':
     resolution: {integrity: sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==}
@@ -2874,7 +2874,7 @@ snapshots:
   '@biomejs/cli-win32-x64@2.6.4':
     optional: true
 
-  '@chamba/core@1.7.0':
+  '@chamba/core@1.15.0':
     dependencies:
       zod: 3.25.76
 
