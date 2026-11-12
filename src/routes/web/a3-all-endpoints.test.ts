@@ -73,6 +73,8 @@ const ALL_ENDPOINTS = [
   '/api/web/g/grp-a3/raw?path=test.md',
   '/api/web/g/grp-a3/conflicts/view?copyPath=copy.md',
   '/api/web/g/grp-a3/topics/education',
+  // PARCHE-012
+  '/api/web/g/grp-a3/secrets',
 ];
 
 describe('A3 (all endpoints): security matrix', () => {

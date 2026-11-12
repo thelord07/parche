@@ -53,6 +53,7 @@ export function makeConfig(dataDir: string, overrides: Partial<Config> = {}): Co
     mailFrom: 'parche@localhost',
     creators: [],
     isProduction: false,
+    secretGate: 'report',
     ...overrides,
   };
 }

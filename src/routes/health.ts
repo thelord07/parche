@@ -7,6 +7,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       status: 'ok',
       version: VERSION,
       metaBackfill: (app.metaStatus as { backfill: string } | undefined)?.backfill ?? 'idle',
+      secretScan: (app.secretScanStatus as { scan: string } | undefined)?.scan ?? 'idle',
     });
   });
 }

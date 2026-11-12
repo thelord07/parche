@@ -1,10 +1,17 @@
 import type { PushResult } from '@chamba/core';
-import { isSyncable, pathKey, pushRequestSchema, pushResponseSchema } from '@chamba/core';
+import {
+  isScannable,
+  isSyncable,
+  pathKey,
+  pushRequestSchema,
+  pushResponseSchema,
+} from '@chamba/core';
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { authenticate, requireCan } from '../auth/plugin.js';
 import { blobRefs, changes, files, groups } from '../db/schema.js';
 import { updateFileMetaFromBlob } from '../meta/file-meta.js';
+import { resolveAllForPath, scanHeadForPath } from '../secrets/scan-path.js';
 import type { StoragePort } from '../storage/storage-port.js';
 
 export interface PushRouteOpts {
@@ -185,11 +192,24 @@ export async function pushRoutes(app: FastifyInstance, opts: PushRouteOpts = {})
 
       const body = pushResponseSchema.parse({ results });
 
-      // Post-push: update file_meta for ok results with .md files.
-      // Fire-and-forget OUTSIDE the transaction. Error never fails the push.
+      // Post-push: update file_meta for ok results with .md files, and reconcile
+      // secret_findings (PARCHE-012). Both fire-and-forget OUTSIDE the
+      // transaction — errors never fail the push.
       if (storage) {
+        // newHash is already known from the validated request: for an 'ok' result
+        // the path's head is exactly this value (either just advanced to it, or
+        // already matched it — the idempotent case). null = tombstone.
+        const newHashByPath = new Map(pushChanges.map((c) => [c.path, c.newHash]));
+        const scanLog = app.log as {
+          warn: (m: string, o?: unknown) => void;
+          info: (m: string, o?: unknown) => void;
+        };
+
         for (const r of results) {
-          if (r.status === 'ok' && r.path.endsWith('.md')) {
+          if (r.status !== 'ok') continue;
+          const newHash = newHashByPath.get(r.path) ?? null;
+
+          if (r.path.endsWith('.md')) {
             // Get the hash that was just committed
             const fileRow = app.db
               .select({ headHash: files.headHash })
@@ -208,6 +228,17 @@ export async function pushRoutes(app: FastifyInstance, opts: PushRouteOpts = {})
                 // never fails the push
               });
             }
+          }
+
+          // N4 — tombstone derived from the request itself, not re-read from DB.
+          if (newHash === null) {
+            resolveAllForPath({ db: app.db, log: scanLog }, groupId, r.path);
+          } else if (isScannable(r.path)) {
+            scanHeadForPath({ db: app.db, storage, log: scanLog }, groupId, r.path, newHash).catch(
+              () => {
+                // never fails the push
+              },
+            );
           }
         }
       }

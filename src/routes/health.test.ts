@@ -32,4 +32,16 @@ describe('GET /health', () => {
     const body = response.json<{ status: string; version: string }>();
     expect(body.version).toBe(pkg.version);
   });
+
+  it('PARCHE-012: secretScan field exists and reaches done', async () => {
+    let secretScan = 'idle';
+    for (let i = 0; i < 50 && secretScan !== 'done'; i++) {
+      const response = await app.inject({ method: 'GET', url: '/health' });
+      const body = response.json<{ secretScan: string }>();
+      expect(body).toHaveProperty('secretScan');
+      secretScan = body.secretScan;
+      if (secretScan !== 'done') await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(secretScan).toBe('done');
+  });
 });

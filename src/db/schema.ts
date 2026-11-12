@@ -223,3 +223,48 @@ export const fileMeta = sqliteTable(
     index('file_meta_conflict_idx').on(t.groupId, t.conflictOf),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// secret_findings — PARCHE-012 (ENMIENDA v2 D2). Un hallazgo por
+// (group_id, path, kind, fingerprint); reabre si el secreto reaparece.
+// resolved_at: el head de esa ruta pasó a un blob sin ese hallazgo (o tombstone).
+// acknowledged_at/by: la persona confirmó "ya roté la credencial" (solo UPDATE).
+// ---------------------------------------------------------------------------
+
+export const secretFindings = sqliteTable(
+  'secret_findings',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    groupId: text('group_id').notNull(),
+    path: text('path').notNull(),
+    hash: text('hash').notNull(),
+    kind: text('kind').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    foundAt: text('found_at').notNull(),
+    resolvedAt: text('resolved_at'),
+    acknowledgedAt: text('acknowledged_at'),
+    acknowledgedBy: text('acknowledged_by'),
+  },
+  (t) => [
+    uniqueIndex('secret_findings_path_kind_fp_idx').on(t.groupId, t.path, t.kind, t.fingerprint),
+    index('secret_findings_open_idx').on(t.groupId, t.resolvedAt),
+    index('secret_findings_ack_idx').on(t.groupId, t.acknowledgedAt),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// secret_scan_state — equivalente de file_meta.hash para el escaneo de secretos:
+// última (ruta, hash) ya escaneada por el backfill/hook, para que ambos sean
+// idempotentes y O(cambios) en cada arranque.
+// ---------------------------------------------------------------------------
+
+export const secretScanState = sqliteTable(
+  'secret_scan_state',
+  {
+    groupId: text('group_id').notNull(),
+    path: text('path').notNull(),
+    hash: text('hash').notNull(),
+    scannedAt: text('scanned_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.groupId, t.path] })],
+);

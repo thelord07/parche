@@ -108,6 +108,28 @@ describe('loadConfig', () => {
   });
 });
 
+describe('PARCHE_SECRET_GATE (PARCHE-012)', () => {
+  it('defaults to report', () => {
+    const config = loadConfig({});
+    expect(config.secretGate).toBe('report');
+  });
+
+  it('accepts block', () => {
+    const config = loadConfig({ PARCHE_SECRET_GATE: 'block' });
+    expect(config.secretGate).toBe('block');
+  });
+
+  it('throws ConfigError naming PARCHE_SECRET_GATE for an invalid value', () => {
+    expect(() => loadConfig({ PARCHE_SECRET_GATE: 'delete' })).toThrow(ConfigError);
+    try {
+      loadConfig({ PARCHE_SECRET_GATE: 'delete' });
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).message).toMatch(/PARCHE_SECRET_GATE/);
+    }
+  });
+});
+
 describe('new PARCHE-006 config fields', () => {
   it('PARCHE_PUBLIC_URL is optional — loadConfig does not throw without it', () => {
     expect(() => loadConfig({})).not.toThrow();

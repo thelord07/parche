@@ -10,7 +10,7 @@ Es la parte **premium/privada** del ecosistema chamba. `package.json` tiene `"pr
 
 - Node 22 LTS, TypeScript 5.6, ESM
 - Fastify 5 (HTTP server, `inject()` para tests)
-- @chamba/core ^1.7.0 (schemas compartidos, `can()`, `isSyncable()`, `pathKey()`, `PROTOCOL_VERSION`)
+- @chamba/core ^1.15.0 (schemas compartidos, `can()`, `isSyncable()`, `pathKey()`, `PROTOCOL_VERSION`, `scanText()`/`isScannable()`/`Finding` — escáner de secretos CHAMBA-021)
 - better-sqlite3 v11 (síncrono, WAL mode — usa prebuild-install, no requiere node-gyp)
 - drizzle-orm (transacciones síncronas)
 - @fastify/rate-limit ^11 (compatible con Fastify 5 vía fastify-plugin v6; `global:false` = opt-in por ruta)
@@ -97,6 +97,15 @@ src/
     changes.test.ts
     push.ts                     # POST /api/g/:slug/push (auth + can('write'))
     push.test.ts
+    web/
+      secrets.ts                # GET .../secrets + POST .../secrets/:id/ack (owner/admin, PARCHE-012)
+  secrets/
+    node-hash.ts        # NodeHash implements HashPort (node:crypto) — para scanText
+    scan-blob.ts         # scanBuffer/kindsOf — gate del PUT (≤ 2 MiB, UTF-8 estricto)
+    allow-header.ts      # parseAllowHeader — X-Parche-Secret-Allow
+    scan-status.ts       # SecretScanStatus (idle|running|done)
+    scan-path.ts         # scanHeadForPath/resolveAllForPath — reconciliación por ruta
+    backfill.ts          # runSecretScan/startSecretScanBackground — arranque idempotente
 web/                # SPA React (Vite, TypeScript, react-router-dom v6)
   index.html
   vite.config.ts
@@ -131,8 +140,9 @@ deploy/
 | `PARCHE_MAX_BLOB_BYTES` | `20971520` | Tamaño máximo de blob (20 MiB) |
 | `PARCHE_LOG_LEVEL` | `info` | Nivel de log de pino |
 | `PARCHE_TRUST_PROXY` | `` (vacío) | IPs/CIDRs de proxy confiables para `X-Forwarded-For`. En producción Docker: `172.28.0.1` |
+| `PARCHE_SECRET_GATE` | `report` | `report\|block` — gate de secretos en `PUT /api/blob/:hash` (PARCHE-012). `block` solo cuando haya un cliente chamba con CHAMBA-023 publicado |
 
-## Modelo de datos (8 tablas)
+## Modelo de datos (13 tablas)
 
 | Tabla | Descripción |
 |---|---|
@@ -144,6 +154,11 @@ deploy/
 | `files` | Estado actual de archivos (head_hash, head_seq, path_key) |
 | `changes` | Log de cambios append-only (seq, path, hash) |
 | `blob_refs` | Scope de blobs por grupo (group_id, hash). Solo lo escribe el `PUT` de blobs (prueba de posesión); el push nunca lo inserta |
+| `sessions` | Sesión web (cookie `parche_session`); solo `token_hash` |
+| `magic_links` | Tokens de un solo uso para auth sin contraseña; solo `token_hash` |
+| `file_meta` | Metadata extraída por archivo vivo (title, summary, tags, conflict_of, …) |
+| `secret_findings` | Hallazgos del escáner de secretos (PARCHE-012): PK `id`, UNIQUE `(group_id,path,kind,fingerprint)`, `resolved_at`/`acknowledged_at`/`acknowledged_by` — nunca el valor del secreto |
+| `secret_scan_state` | Última `(ruta, hash)` ya escaneada por el backfill/hook de secretos — idempotencia O(cambios) |
 
 ## Advertencia de seguridad
 
@@ -160,6 +175,17 @@ Nada se borra físicamente de la base de datos. Esta regla no es negociable.
 **parche no tiene operación de borrado de blobs.** `StoragePort` no tiene método `delete`/`remove`/`erase`. `FilesystemStorage` solo limpia sus propios archivos temporales (bajo `<dataDir>/tmp/`) cuando ocurre un error durante un PUT; nunca toca los blobs almacenados.
 
 El archivo `src/no-destructive.test.ts` verifica automáticamente que no se introduzcan operaciones destructivas.
+
+## Nunca loguear ni devolver el valor de un secreto (PARCHE-012)
+
+El escáner de `@chamba/core` (`scanText`) es value-free por construcción: solo
+devuelve `kind`, `line` y `fingerprint` (hash, nunca el valor). `src/secrets/`
+nunca importa el matcher interno de core (`matchRules` no se exporta del
+índice). Los logs alrededor del gate del PUT y la reconciliación de hallazgos
+solo llevan `{groupId, userId, deviceId, kinds, allowed}` — nunca el body, el
+texto del blob, ni el fingerprint hacia el cliente web (el payload de
+`/api/web/g/:slug/secrets` tampoco lo incluye). `src/no-console-secrets.test.ts`
+cubre también `secrets/` y `meta/`.
 
 ## Autenticación
 

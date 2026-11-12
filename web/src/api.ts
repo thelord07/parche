@@ -229,6 +229,31 @@ export interface MemberRow {
   devices: MemberDevice[];
 }
 
+// ─── Secret-scan types (PARCHE-012) ───────────────────────────────────────────
+// Nunca llevan fingerprint, line ni el valor del secreto (A4).
+
+export interface SecretFindingItem {
+  id: number;
+  path: string;
+  kind: string;
+  since: string;
+  resolvedAt?: string;
+}
+
+export interface SecretsListResponse {
+  count: number;
+  items: SecretFindingItem[];
+  hasMore: boolean;
+  /** Total finding rows matching this list (not just the DISTINCT-path `count`) — lets the
+   * front compute exactly how many are hidden beyond `items` ("y N más…"). */
+  total: number;
+}
+
+export interface SecretsResponse {
+  open: SecretsListResponse;
+  pendingRotation: SecretsListResponse;
+}
+
 // ─── Topics types ──────────────────────────────────────────────────────────────
 
 export interface TopicsNode {
@@ -323,6 +348,13 @@ export const api = {
     ),
 
   getTopics: (slug: string) => apiFetch<TopicsResponse>(`/api/web/g/${slug}/topics`, 'GET'),
+
+  // ─── Secret-scan (PARCHE-012) ────────────────────────────────────────────────
+
+  getSecrets: (slug: string) => apiFetch<SecretsResponse>(`/api/web/g/${slug}/secrets`, 'GET'),
+
+  ackSecret: (slug: string, id: number) =>
+    apiFetch<{ ok: boolean }>(`/api/web/g/${slug}/secrets/${id}/ack`, 'POST'),
 
   // ─── Members (PARCHE-007-B) ─────────────────────────────────────────────────
 

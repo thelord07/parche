@@ -37,6 +37,8 @@ const envSchema = z.object({
   PARCHE_SMTP_URL: z.string().optional(),
   PARCHE_MAIL_FROM: z.string().optional(),
   PARCHE_CREATORS: z.string().optional().default(''),
+  // New in PARCHE-012 — report|block, default report (CHAMBA-023 aún no publicado)
+  PARCHE_SECRET_GATE: z.enum(['report', 'block']).default('report'),
 });
 
 export interface Config {
@@ -52,6 +54,8 @@ export interface Config {
   mailFrom: string;
   creators: string[];
   isProduction: boolean;
+  /** PARCHE-012 — report: loguea y guarda igual; block: 422, sin guardar. */
+  secretGate: 'report' | 'block';
 }
 
 export class ConfigError extends Error {
@@ -127,5 +131,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mailFrom,
     creators,
     isProduction: env.NODE_ENV === 'production',
+    secretGate: data.PARCHE_SECRET_GATE,
   };
 }

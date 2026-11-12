@@ -6,7 +6,7 @@
 
 - Node 22, TypeScript 5.6, ESM
 - Fastify 5 with pino logger (redacts Bearer tokens and deviceToken)
-- @chamba/core ^1.7.0 (shared schemas, `can()`, `isSyncable()`, `pathKey()`)
+- @chamba/core ^1.15.0 (shared schemas, `can()`, `isSyncable()`, `pathKey()`, `scanText()`/`isScannable()` secret scanner)
 - better-sqlite3 v11 (synchronous, WAL mode)
 - drizzle-orm (sync transactions)
 - @fastify/rate-limit ^11 (per-route, join endpoint only)
@@ -49,6 +49,7 @@ pnpm start
 | `PARCHE_PUBLIC_URL` | — (**required in production**) | Public base URL (e.g. `https://parche.chamba.tools`); sign-in links are built from it, never from the `Host` header |
 | `PARCHE_MAIL_FROM` | `parche@<host of PARCHE_PUBLIC_URL>` | Sender address of sign-in emails |
 | `PARCHE_CREATORS` | `` (empty) | Comma-separated emails allowed to create parches from the web (case-insensitive) |
+| `PARCHE_SECRET_GATE` | `report` | `report\|block` — secret-scan gate on `PUT /api/blob/:hash`. See [Secret scanning](#secret-scanning) |
 
 Invalid values cause the process to exit with a non-zero code and a message naming the variable.
 
@@ -526,3 +527,59 @@ sqlite3 /srv/parche-backups/<date>/parche.db "PRAGMA integrity_check"
 ```
 
 For restore instructions see [`deploy/restore.md`](deploy/restore.md).
+
+## Secret scanning
+
+The server is the only point that sees everything that gets uploaded, so it
+scans text blobs for secret-shaped values on the way in — independent of
+whether the client (`@chamba/mcp`) also scans locally (CHAMBA-021). It never
+logs or returns the matched value: only `kind` (e.g. `aws-access-key`) and a
+value-free `fingerprint` ever leave `@chamba/core`'s scanner.
+
+**Gate on `PUT /api/blob/:hash`** — reads at most 2 MiB into memory (bodies
+above that, and anything that is not strict UTF-8, are **not scanned** —
+documented limitation; images/PDF are out of scope by the scanner's own
+design). With findings:
+
+- `PARCHE_SECRET_GATE=block` — `422 {"error":"secret_detected","kinds":[...]}`.
+  The blob is **not** stored and no `blob_ref` is created (nothing is deleted
+  either way — parche never deletes). A `GET`/`HEAD` of that hash still `404`s.
+- `PARCHE_SECRET_GATE=report` (**default**) — the blob is stored normally
+  (`201`), and a `warn` log records `{groupId, userId, deviceId, kinds,
+  allowed: false, mode: 'report'}` (never the value). This is the default
+  because **no `@chamba/mcp` client sends the `X-Parche-Secret-Allow` header
+  today** (verified: zero occurrences in `chamba/packages/`) — switching to
+  `block` before that header exists would turn every already-exempted false
+  positive into an unrecoverable `422` for the client. Switch to `block` once
+  a chamba client that implements **CHAMBA-023** (sends the header and
+  handles the per-file `422`) is published.
+- Allowlist (`X-Parche-Secret-Allow: <fingerprint>,<fingerprint>,…`, ≤ 2 KiB,
+  ≤ 64 entries, `/^[0-9a-f]{12}$/` each): if **all** findings in the body are
+  in that list, the blob is accepted and a `info` log records `allowed: true`.
+  The server only knows fingerprints (not paths), so an exemption is scoped
+  per-request, not per-path like the client's own allowlist.
+
+**Reporting what's already uploaded** — an idempotent task at startup (and
+the `scan-secrets` admin command) scans the live head of every `.md`,
+`.canvas`, `.base` and `.svg` file, storing findings in `secret_findings`
+(`group_id, path, hash, kind, fingerprint, found_at, resolved_at,
+acknowledged_at, acknowledged_by`). `resolved_at` is set (never a delete) when
+a path's head moves to a blob without that finding, or to a tombstone
+(deleted note). A secret that reappears later reopens the same row
+(`found_at` is preserved). The same push hook also keeps findings in sync in
+real time. `GET /health` exposes `secretScan: idle|running|done`, mirroring
+the existing `metaBackfill` field. Findings are **per live head**, not per
+blob: in `report` mode a blob that was `PUT` but never pushed as a file's
+head (or pushed and later superseded/tombstoned) is stored on disk without
+ever having a `secret_findings` row recorded for it.
+
+**Dashboard warning** (owner/admin only, both gate modes) — the web app shows
+"N notas con posibles secretos" (open findings) and "Pendiente rotar
+credencial" (findings already resolved but not yet acknowledged), each row as
+`ruta · tipo · desde …`. **Never** the fingerprint or the value. The rule:
+*"Quitar el valor de la nota no lo borra del historial: rota la credencial."*
+A "Ya roté la credencial" button on each row calls
+`POST /api/web/g/:slug/secrets/:id/ack` (CSRF required, owner/admin only;
+idempotent, UPDATE-only). Nothing about an existing note — its content, raw
+blob, or history — is hidden because of a finding; `GET /api/web/g/:slug/note`
+and `/raw` work exactly as before.

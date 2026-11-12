@@ -369,3 +369,18 @@ export async function reindexMeta(db: AppDb, storage: StoragePort): Promise<void
   await runBackfill({ db, storage, metaStatus });
   process.stdout.write('reindex-meta: done\n');
 }
+
+// ---------------------------------------------------------------------------
+// scan-secrets — synchronous admin run of the secret-scan backfill (PARCHE-012)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the secret-scan backfill to completion (not fire-and-forget). Used by
+ * the admin CLI command. Uses process.stdout.write, never console.*.
+ */
+export async function scanSecrets(db: AppDb, storage: StoragePort): Promise<void> {
+  const { runSecretScan } = await import('../secrets/backfill.js');
+  const secretScanStatus = { scan: 'idle' as 'idle' | 'running' | 'done' };
+  await runSecretScan({ db, storage, secretScanStatus });
+  process.stdout.write('scan-secrets: done\n');
+}
