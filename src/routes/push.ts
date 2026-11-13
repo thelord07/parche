@@ -11,6 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import { authenticate, requireCan } from '../auth/plugin.js';
 import { blobRefs, changes, files, groups } from '../db/schema.js';
 import { updateFileMetaFromBlob } from '../meta/file-meta.js';
+import { RULES_VERSION } from '../secrets/rules-version.js';
 import { resolveAllForPath, scanHeadForPath } from '../secrets/scan-path.js';
 import type { StoragePort } from '../storage/storage-port.js';
 
@@ -234,11 +235,15 @@ export async function pushRoutes(app: FastifyInstance, opts: PushRouteOpts = {})
           if (newHash === null) {
             resolveAllForPath({ db: app.db, log: scanLog }, groupId, r.path);
           } else if (isScannable(r.path)) {
-            scanHeadForPath({ db: app.db, storage, log: scanLog }, groupId, r.path, newHash).catch(
-              () => {
-                // never fails the push
-              },
-            );
+            scanHeadForPath(
+              { db: app.db, storage, log: scanLog },
+              groupId,
+              r.path,
+              newHash,
+              RULES_VERSION,
+            ).catch(() => {
+              // never fails the push
+            });
           }
         }
       }

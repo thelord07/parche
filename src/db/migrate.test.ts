@@ -123,6 +123,37 @@ describe('migration upgrade path', () => {
     }
   });
 
+  it('una base migrada solo hasta 0003 recibe resolved_reason y rules_version (PARCHE-013)', () => {
+    const upTo0003 = migrationsCopy(tmp, (entries) => entries.filter((e) => e.idx <= 3));
+    const raw = new Database(':memory:');
+    try {
+      migrate(drizzle(raw), { migrationsFolder: upTo0003 });
+      expect(tableNames(raw)).toContain('secret_findings');
+      expect(tableNames(raw)).toContain('secret_scan_state');
+
+      const columnsBefore = raw.prepare('PRAGMA table_info(secret_findings)').all() as Array<{
+        name: string;
+      }>;
+      expect(columnsBefore.map((c) => c.name)).not.toContain('resolved_reason');
+
+      runMigrations(raw);
+
+      expect(tableNames(raw)).toEqual([...EXPECTED_TABLES].sort());
+
+      const secretFindingsColumns = raw
+        .prepare('PRAGMA table_info(secret_findings)')
+        .all() as Array<{ name: string }>;
+      expect(secretFindingsColumns.map((c) => c.name)).toContain('resolved_reason');
+
+      const secretScanStateColumns = raw
+        .prepare('PRAGMA table_info(secret_scan_state)')
+        .all() as Array<{ name: string }>;
+      expect(secretScanStateColumns.map((c) => c.name)).toContain('rules_version');
+    } finally {
+      raw.close();
+    }
+  });
+
   it('una base creada desde cero con el journal defectuoso de 0002 sigue arrancando', () => {
     const buggy = migrationsCopy(tmp, (entries) =>
       entries.map((e) => (e.tag === '0002_add_file_meta' ? { ...e, when: 1751500000000 } : e)),

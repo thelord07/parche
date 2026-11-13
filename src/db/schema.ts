@@ -228,6 +228,10 @@ export const fileMeta = sqliteTable(
 // secret_findings — PARCHE-012 (ENMIENDA v2 D2). Un hallazgo por
 // (group_id, path, kind, fingerprint); reabre si el secreto reaparece.
 // resolved_at: el head de esa ruta pasó a un blob sin ese hallazgo (o tombstone).
+// resolved_reason (PARCHE-013, D2): motivo del cierre — 'rules_update' cuando
+// el cierre fue por un cambio de reglas de @chamba/core (contenido sin tocar);
+// `null` en todos los demás casos (insert, reopen, cierre normal). Ciclo de
+// vida completo en src/secrets/scan-path.ts.
 // acknowledged_at/by: la persona confirmó "ya roté la credencial" (solo UPDATE).
 // ---------------------------------------------------------------------------
 
@@ -242,6 +246,7 @@ export const secretFindings = sqliteTable(
     fingerprint: text('fingerprint').notNull(),
     foundAt: text('found_at').notNull(),
     resolvedAt: text('resolved_at'),
+    resolvedReason: text('resolved_reason'),
     acknowledgedAt: text('acknowledged_at'),
     acknowledgedBy: text('acknowledged_by'),
   },
@@ -256,6 +261,11 @@ export const secretFindings = sqliteTable(
 // secret_scan_state — equivalente de file_meta.hash para el escaneo de secretos:
 // última (ruta, hash) ya escaneada por el backfill/hook, para que ambos sean
 // idempotentes y O(cambios) en cada arranque.
+// rules_version (PARCHE-013, D3): versión de @chamba/core con la que se
+// escaneó por última vez esa ruta. Si difiere de la versión instalada (o es
+// NULL), la ruta vuelve a entrar en el conjunto pendiente del backfill aunque
+// el hash no haya cambiado — así las reglas nuevas se aplican también a
+// archivos ya limpios, sin reescanear todo el vault en cada arranque.
 // ---------------------------------------------------------------------------
 
 export const secretScanState = sqliteTable(
@@ -264,6 +274,7 @@ export const secretScanState = sqliteTable(
     groupId: text('group_id').notNull(),
     path: text('path').notNull(),
     hash: text('hash').notNull(),
+    rulesVersion: text('rules_version'),
     scannedAt: text('scanned_at').notNull(),
   },
   (t) => [primaryKey({ columns: [t.groupId, t.path] })],

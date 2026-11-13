@@ -11,11 +11,20 @@
  * llegan a la base.
  */
 import type { Finding } from '@chamba/core';
+import { isScannable } from '@chamba/core';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { AppDb } from '../db/client.js';
 import { files, secretFindings, secretScanState } from '../db/schema.js';
 import type { StoragePort } from '../storage/storage-port.js';
 import { SCAN_MAX_BYTES, scanBuffer } from './scan-blob.js';
+
+/**
+ * Motivo por el que se cerraron hallazgos en esta reconciliación.
+ * `'rules_update'`: el contenido no cambió, pero ya no lo flaguea ninguna
+ * regla vigente (PARCHE-013, D2). `undefined`/sin pasar: cierre normal (el
+ * head avanzó a un blob sin ese hallazgo, o la ruta es un tombstone).
+ */
+export type CloseReason = 'rules_update';
 
 /** N1 — más allá de este tope, se insertan las primeras N (orden determinista) y NO se cierra nada. */
 export const MAX_FINDINGS_PER_PATH = 100;
@@ -73,6 +82,16 @@ function chunk<T>(items: T[], size: number): T[][] {
  * conjunto actual de hallazgos `F` (ya deduplicado por (kind,fingerprint)).
  * Debe ejecutarse dentro de la MISMA transacción síncrona que hizo el guard
  * de staleness (recibe `tx`, no `db`).
+ *
+ * PARCHE-013 (S4.0 corrección 2 / N1): `contentTruncated` es `true` cuando el
+ * texto escaneado es solo un PREFIJO del blob real (lectura acotada a
+ * `SCAN_MAX_BYTES + 1`, rama lossy de `shouldScanContent` con `gatePath`). Un
+ * secreto que viva después del corte no puede marcarse como resuelto, así
+ * que — igual que la truncación por cantidad (N1) — se insertan/reabren los
+ * hallazgos encontrados en el prefijo pero NUNCA se cierra nada.
+ *
+ * PARCHE-013 (S4.2 / B2): `closeReason` se escribe SOLO en el UPDATE que
+ * cierra filas (nunca en el insert/reopen, que siempre lo limpian a `null`).
  */
 function reconcileFindings(
   tx: AppDb,
@@ -81,10 +100,14 @@ function reconcileFindings(
   hash: string,
   dedupedFindings: Finding[],
   now: string,
+  contentTruncated: boolean,
   log?: ScanPathDeps['log'],
+  closeReason?: CloseReason,
 ): void {
-  const truncated = dedupedFindings.length > MAX_FINDINGS_PER_PATH;
-  const toUpsert = truncated ? dedupedFindings.slice(0, MAX_FINDINGS_PER_PATH) : dedupedFindings;
+  const countTruncated = dedupedFindings.length > MAX_FINDINGS_PER_PATH;
+  const toUpsert = countTruncated
+    ? dedupedFindings.slice(0, MAX_FINDINGS_PER_PATH)
+    : dedupedFindings;
 
   for (const batch of chunk(toUpsert, CHUNK_SIZE)) {
     for (const f of batch) {
@@ -97,6 +120,7 @@ function reconcileFindings(
           fingerprint: f.fingerprint,
           foundAt: now,
           resolvedAt: null,
+          resolvedReason: null,
           acknowledgedAt: null,
           acknowledgedBy: null,
         })
@@ -110,6 +134,9 @@ function reconcileFindings(
           set: {
             hash,
             resolvedAt: null,
+            // B2 — un motivo de cierre viejo (p. ej. rules_update) nunca
+            // sobrevive a la reapertura: se limpia siempre, igual que resolvedAt.
+            resolvedReason: null,
             // Reopen clears ack fields; a finding that was already open keeps its ack.
             acknowledgedAt: sql`CASE WHEN ${secretFindings.resolvedAt} IS NULL THEN ${secretFindings.acknowledgedAt} ELSE NULL END`,
             acknowledgedBy: sql`CASE WHEN ${secretFindings.resolvedAt} IS NULL THEN ${secretFindings.acknowledgedBy} ELSE NULL END`,
@@ -119,13 +146,14 @@ function reconcileFindings(
     }
   }
 
-  if (truncated) {
-    log?.info('secret-scan: findings truncated for path', {
+  if (countTruncated || contentTruncated) {
+    log?.info('secret-scan: findings not closed for path (truncated)', {
       groupId,
       path,
-      total: dedupedFindings.length,
+      countTruncated,
+      contentTruncated,
     });
-    return; // N1 — nunca cerrar hallazgos cuando el conjunto fue truncado.
+    return; // N1 / S4.0 corrección 2 — nunca cerrar cuando lo escaneado es parcial.
   }
 
   // Cerrar las filas abiertas cuyo (kind,fingerprint) ya no está en F.
@@ -152,9 +180,19 @@ function reconcileFindings(
   for (const batch of chunk(idsToClose, CHUNK_SIZE)) {
     if (batch.length === 0) continue;
     tx.update(secretFindings)
-      .set({ resolvedAt: now })
+      .set({ resolvedAt: now, resolvedReason: closeReason ?? null })
       .where(inArray(secretFindings.id, batch))
       .run();
+  }
+
+  // Review ronda 1 #5 — observabilidad: cuántos hallazgos se cerraron y por
+  // qué motivo. Nunca incluye `path` ni ningún valor/fingerprint.
+  if (idsToClose.length > 0) {
+    log?.info('secret-scan: findings closed', {
+      groupId,
+      closed: idsToClose.length,
+      reason: closeReason ?? 'content_change',
+    });
   }
 }
 
@@ -162,21 +200,61 @@ function reconcileFindings(
  * Escanea el blob `hash` (head actual de `path`) y reconcilia los hallazgos.
  * Guard de staleness (M2, igual que `updateFileMetaFromBlob`): si `hash` ya no
  * es el head de `(groupId, path)` al entrar a la transacción, no escribe nada.
+ *
+ * PARCHE-013:
+ * - `rulesVersion` se graba siempre en `secret_scan_state` (incluso cuando
+ *   `findings === null`, S4.0/nit ronda 2) para que esa ruta no se vuelva a
+ *   leer en cada arranque solo porque no es escaneable.
+ * - Paridad con el cliente (D3/OQ3): si `path` es `isScannable`, se pasa como
+ *   `gatePath` a `scanBuffer` (decodificación lossy y sin tope). Combinado
+ *   con S4.0 corrección 2 (truncado nunca cierra), esto da cobertura a
+ *   `.md`/`.canvas`/`.base`/`.svg` que la rama estricta del servidor se
+ *   saltaba hoy, sin arriesgar un cierre a partir de contenido parcial.
+ * - `closeReason` se propaga tal cual a `reconcileFindings`: solo el
+ *   UPDATE que cierra filas lo escribe (S4.2/B2).
  */
+/**
+ * Resultado de un intento de `scanHeadForPath` — distingue tres desenlaces
+ * (review ronda 2, nit) para que el agregado de `runSecretScan` no confunda
+ * "se procesó de verdad" con "el head ya había avanzado bajo nuestros pies":
+ * - `'scanned'`: la transacción corrió y escribió (reconcilió hallazgos y/o
+ *   `secret_scan_state`), con o sin hallazgos — incluye el caso `findings
+ *   === null` (no escaneable: sí se registra `secret_scan_state`, ver B1).
+ * - `'stale'`: el head cambió entre que se leyó el blob y se entró a la
+ *   transacción; no se escribió nada. Un push concurrente ya ganó — la
+ *   ruta probablemente ya quedó cubierta por ese push (hook de
+ *   `scanHeadForPath` en `push.ts`) o se re-seleccionará con el head nuevo
+ *   en la siguiente página/corrida.
+ * - `'failed'`: blob ausente o excepción interna (nunca propaga — se
+ *   atrapa y se loguea con `log.warn`, sin valores).
+ */
+export type ScanOutcome = 'scanned' | 'stale' | 'failed';
+
 export async function scanHeadForPath(
   deps: ScanPathDeps,
   groupId: string,
   path: string,
   hash: string,
-): Promise<void> {
+  rulesVersion: string,
+  closeReason?: CloseReason,
+): Promise<ScanOutcome> {
   try {
     const stream = await deps.storage.get(hash);
-    if (!stream) return;
+    if (!stream) {
+      // Missing blob — not a bug per se (could be a race with a tombstone),
+      // but reported as `'failed'` so the caller's aggregate reflects it;
+      // the keyset cursor in backfill.ts still advances past this path
+      // regardless, so it never loops.
+      deps.log?.warn('secret-scan: blob not found for head', { groupId, path });
+      return 'failed';
+    }
     const buf = await readBoundedFromStream(stream, SCAN_MAX_BYTES + 1);
-    const findings = await scanBuffer(buf, path);
+    const gatePath = isScannable(path) ? path : undefined;
+    const findings = await scanBuffer(buf, path, { gatePath });
     const now = new Date().toISOString();
-    const deduped = findings === null ? [] : dedupeByKindFingerprint(findings);
+    const contentTruncated = buf.length > SCAN_MAX_BYTES;
 
+    let stale = false;
     deps.db.transaction((tx) => {
       const currentFile = tx
         .select({ headHash: files.headHash })
@@ -184,24 +262,58 @@ export async function scanHeadForPath(
         .where(and(eq(files.groupId, groupId), eq(files.path, path)))
         .get();
 
-      if (currentFile?.headHash !== hash) return; // stale — otra escritura ya avanzó el head
+      if (currentFile?.headHash !== hash) {
+        stale = true;
+        return; // stale — otra escritura ya avanzó el head
+      }
 
-      reconcileFindings(tx, groupId, path, hash, deduped, now, deps.log);
+      const scanStateValues = { groupId, path, hash, rulesVersion, scannedAt: now };
+
+      if (findings === null) {
+        // B1 — "no se escaneó" NUNCA equivale a "limpio": no se reconcilia
+        // (no se cierra ni se abre nada), pero sí se registra que esta ruta
+        // ya se intentó con esta versión de reglas (nit ronda 2) para no
+        // releer el blob en cada arranque mientras siga sin ser escaneable.
+        tx.insert(secretScanState)
+          .values(scanStateValues)
+          .onConflictDoUpdate({
+            target: [secretScanState.groupId, secretScanState.path],
+            set: { hash, rulesVersion, scannedAt: now },
+          })
+          .run();
+        deps.log?.info('secret-scan: not scannable, findings untouched', { groupId, path });
+        return;
+      }
+
+      const deduped = dedupeByKindFingerprint(findings);
+      reconcileFindings(
+        tx,
+        groupId,
+        path,
+        hash,
+        deduped,
+        now,
+        contentTruncated,
+        deps.log,
+        closeReason,
+      );
 
       tx.insert(secretScanState)
-        .values({ groupId, path, hash, scannedAt: now })
+        .values(scanStateValues)
         .onConflictDoUpdate({
           target: [secretScanState.groupId, secretScanState.path],
-          set: { hash, scannedAt: now },
+          set: { hash, rulesVersion, scannedAt: now },
         })
         .run();
     });
+    return stale ? 'stale' : 'scanned';
   } catch (err) {
     deps.log?.warn('secret-scan: scanHeadForPath failed', {
       groupId,
       path,
       err: String(err),
     });
+    return 'failed';
   }
 }
 
@@ -222,7 +334,10 @@ export function resolveAllForPath(
     const now = new Date().toISOString();
     deps.db
       .update(secretFindings)
-      .set({ resolvedAt: now })
+      // Review ronda 1 #6 — explícito, igual que el resto del ciclo de vida
+      // de B2: un tombstone es un cierre normal (requiere ack), nunca
+      // `rules_update`.
+      .set({ resolvedAt: now, resolvedReason: null })
       .where(
         and(
           eq(secretFindings.groupId, groupId),

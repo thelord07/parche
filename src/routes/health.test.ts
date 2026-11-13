@@ -33,15 +33,33 @@ describe('GET /health', () => {
     expect(body.version).toBe(pkg.version);
   });
 
-  it('PARCHE-012: secretScan field exists and reaches done', async () => {
-    let secretScan = 'idle';
-    for (let i = 0; i < 50 && secretScan !== 'done'; i++) {
+  it('PARCHE-012/PARCHE-013: secretScan field exists and reaches done', async () => {
+    let state = 'idle';
+    for (let i = 0; i < 50 && state !== 'done'; i++) {
       const response = await app.inject({ method: 'GET', url: '/health' });
-      const body = response.json<{ secretScan: string }>();
+      const body = response.json<{
+        secretScan: {
+          state: string;
+          rulesVersion: string | null;
+          pending: number;
+          scanned: number;
+        };
+      }>();
       expect(body).toHaveProperty('secretScan');
-      secretScan = body.secretScan;
-      if (secretScan !== 'done') await new Promise((r) => setTimeout(r, 20));
+      expect(body.secretScan).toHaveProperty('state');
+      expect(body.secretScan).toHaveProperty('rulesVersion');
+      expect(body.secretScan).toHaveProperty('pending');
+      expect(body.secretScan).toHaveProperty('scanned');
+      state = body.secretScan.state;
+      if (state !== 'done') await new Promise((r) => setTimeout(r, 20));
     }
-    expect(secretScan).toBe('done');
+    expect(state).toBe('done');
+  });
+
+  it('PARCHE-013: /health never leaks a path or a secret value in secretScan', async () => {
+    const response = await app.inject({ method: 'GET', url: '/health' });
+    const text = response.body;
+    // rulesVersion is a semver string (e.g. "1.15.1"), never a path or a value.
+    expect(text).not.toMatch(/\.md|\.canvas|\.base|\.svg/);
   });
 });

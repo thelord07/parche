@@ -3,7 +3,7 @@
  * GET nunca devuelve `fingerprint`, `line` ni el valor del secreto (A4):
  * solo `id` (opaco), `path`, `kind` y fechas.
  */
-import { and, desc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { csrfHook } from '../../auth/csrf.js';
@@ -42,6 +42,17 @@ const idParamSchema = z.object({ id: z.coerce.number().int().positive() });
 function isOwnerOrAdmin(role: string): boolean {
   return role === 'owner' || role === 'admin';
 }
+
+/**
+ * PARCHE-013 (A11) — un hallazgo cerrado por `rules_update` (contenido sin
+ * tocar, solo dejó de matchear una regla) nunca pide rotar nada: se excluye
+ * de las TRES queries de `pendingRotation` (items, count y total) para que
+ * el badge y la lista cuenten siempre lo mismo.
+ */
+const notRulesUpdate = or(
+  isNull(secretFindings.resolvedReason),
+  ne(secretFindings.resolvedReason, 'rules_update'),
+);
 
 export async function secretsRoutes(app: FastifyInstance): Promise<void> {
   // -------------------------------------------------------------------------
@@ -135,6 +146,7 @@ export async function secretsRoutes(app: FastifyInstance): Promise<void> {
             eq(secretFindings.groupId, groupId),
             isNotNull(secretFindings.resolvedAt),
             isNull(secretFindings.acknowledgedAt),
+            notRulesUpdate,
           ),
         )
         .orderBy(desc(secretFindings.resolvedAt))
@@ -152,6 +164,7 @@ export async function secretsRoutes(app: FastifyInstance): Promise<void> {
             eq(secretFindings.groupId, groupId),
             isNotNull(secretFindings.resolvedAt),
             isNull(secretFindings.acknowledgedAt),
+            notRulesUpdate,
           ),
         )
         .get();
@@ -164,6 +177,7 @@ export async function secretsRoutes(app: FastifyInstance): Promise<void> {
             eq(secretFindings.groupId, groupId),
             isNotNull(secretFindings.resolvedAt),
             isNull(secretFindings.acknowledgedAt),
+            notRulesUpdate,
           ),
         )
         .get();

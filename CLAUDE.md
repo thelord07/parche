@@ -10,7 +10,7 @@ Es la parte **premium/privada** del ecosistema chamba. `package.json` tiene `"pr
 
 - Node 22 LTS, TypeScript 5.6, ESM
 - Fastify 5 (HTTP server, `inject()` para tests)
-- @chamba/core ^1.15.0 (schemas compartidos, `can()`, `isSyncable()`, `pathKey()`, `PROTOCOL_VERSION`, `scanText()`/`isScannable()`/`Finding` — escáner de secretos CHAMBA-021)
+- @chamba/core ^1.15.1 (schemas compartidos, `can()`, `isSyncable()`, `pathKey()`, `PROTOCOL_VERSION`, `scanText()`/`isScannable()`/`shouldScanContent()`/`MAX_SCAN_BYTES`/`Finding` — escáner de secretos CHAMBA-021/PARCHE-013)
 - better-sqlite3 v11 (síncrono, WAL mode — usa prebuild-install, no requiere node-gyp)
 - drizzle-orm (transacciones síncronas)
 - @fastify/rate-limit ^11 (compatible con Fastify 5 vía fastify-plugin v6; `global:false` = opt-in por ruta)
@@ -101,11 +101,13 @@ src/
       secrets.ts                # GET .../secrets + POST .../secrets/:id/ack (owner/admin, PARCHE-012)
   secrets/
     node-hash.ts        # NodeHash implements HashPort (node:crypto) — para scanText
-    scan-blob.ts         # scanBuffer/kindsOf — gate del PUT (≤ 2 MiB, UTF-8 estricto)
+    scan-blob.ts         # scanBuffer/kindsOf/findingsPayload — gate del PUT, delega el criterio de qué escanear a shouldScanContent() de core (rama estricta sin path; rama lossy sin tope con gatePath para .md/.canvas/.base/.svg)
     allow-header.ts      # parseAllowHeader — X-Parche-Secret-Allow
-    scan-status.ts       # SecretScanStatus (idle|running|done)
-    scan-path.ts         # scanHeadForPath/resolveAllForPath — reconciliación por ruta
-    backfill.ts          # runSecretScan/startSecretScanBackground — arranque idempotente
+    rules-version.ts     # RULES_VERSION — versión de @chamba/core instalada (define de tsup en build, fallback de node_modules en runtime; nunca lanza)
+    semver-compare.ts    # isSemverGreater — rollback safety para el cierre por rules_update
+    scan-status.ts       # SecretScanStatus (scan: idle|running|done + rulesVersion/pending/scanned)
+    scan-path.ts         # scanHeadForPath/resolveAllForPath — reconciliación por ruta, resolved_reason
+    backfill.ts          # runSecretScan/startSecretScanBackground — arranque idempotente, paginado por keyset
 web/                # SPA React (Vite, TypeScript, react-router-dom v6)
   index.html
   vite.config.ts
@@ -140,7 +142,7 @@ deploy/
 | `PARCHE_MAX_BLOB_BYTES` | `20971520` | Tamaño máximo de blob (20 MiB) |
 | `PARCHE_LOG_LEVEL` | `info` | Nivel de log de pino |
 | `PARCHE_TRUST_PROXY` | `` (vacío) | IPs/CIDRs de proxy confiables para `X-Forwarded-For`. En producción Docker: `172.28.0.1` |
-| `PARCHE_SECRET_GATE` | `report` | `report\|block` — gate de secretos en `PUT /api/blob/:hash` (PARCHE-012). `block` solo cuando haya un cliente chamba con CHAMBA-023 publicado |
+| `PARCHE_SECRET_GATE` | `report` | `report\|block` — gate de secretos en `PUT /api/blob/:hash` (PARCHE-012/PARCHE-013). `block` solo tras: 1) todo el equipo con cliente chamba `≥1.15.1`, 2) este servidor desplegado — ver README "Deployment order" |
 
 ## Modelo de datos (13 tablas)
 
@@ -157,8 +159,8 @@ deploy/
 | `sessions` | Sesión web (cookie `parche_session`); solo `token_hash` |
 | `magic_links` | Tokens de un solo uso para auth sin contraseña; solo `token_hash` |
 | `file_meta` | Metadata extraída por archivo vivo (title, summary, tags, conflict_of, …) |
-| `secret_findings` | Hallazgos del escáner de secretos (PARCHE-012): PK `id`, UNIQUE `(group_id,path,kind,fingerprint)`, `resolved_at`/`acknowledged_at`/`acknowledged_by` — nunca el valor del secreto |
-| `secret_scan_state` | Última `(ruta, hash)` ya escaneada por el backfill/hook de secretos — idempotencia O(cambios) |
+| `secret_findings` | Hallazgos del escáner de secretos (PARCHE-012/PARCHE-013): PK `id`, UNIQUE `(group_id,path,kind,fingerprint)`, `resolved_at`/`resolved_reason`/`acknowledged_at`/`acknowledged_by` — nunca el valor del secreto. `resolved_reason='rules_update'` cuando el cierre fue por cambio de reglas (contenido intacto); `null` en insert/reopen/cierre normal |
+| `secret_scan_state` | Último `(ruta, hash, rules_version)` ya escaneado por el backfill/hook de secretos — idempotencia O(cambios); `rules_version` dispara un re-escaneo completo cuando la versión de `@chamba/core` instalada cambia (PARCHE-013) |
 
 ## Advertencia de seguridad
 
@@ -182,10 +184,12 @@ El escáner de `@chamba/core` (`scanText`) es value-free por construcción: solo
 devuelve `kind`, `line` y `fingerprint` (hash, nunca el valor). `src/secrets/`
 nunca importa el matcher interno de core (`matchRules` no se exporta del
 índice). Los logs alrededor del gate del PUT y la reconciliación de hallazgos
-solo llevan `{groupId, userId, deviceId, kinds, allowed}` — nunca el body, el
-texto del blob, ni el fingerprint hacia el cliente web (el payload de
-`/api/web/g/:slug/secrets` tampoco lo incluye). `src/no-console-secrets.test.ts`
-cubre también `secrets/` y `meta/`.
+solo llevan `{groupId, userId, deviceId, kinds, allowed}` — nunca el body ni
+el texto del blob. El `fingerprint` (PARCHE-013) **sí** viaja en el `422` de
+`PUT /api/blob/:hash` al cliente de **sync**, y solo de los hallazgos del
+contenido que ese mismo device acaba de enviar (ya conoce los valores); sigue
+sin viajar al cliente **web** — el payload de `/api/web/g/:slug/secrets` no
+cambia. `src/no-console-secrets.test.ts` cubre también `secrets/` y `meta/`.
 
 ## Autenticación
 

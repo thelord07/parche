@@ -6,7 +6,7 @@
 
 - Node 22, TypeScript 5.6, ESM
 - Fastify 5 with pino logger (redacts Bearer tokens and deviceToken)
-- @chamba/core ^1.15.0 (shared schemas, `can()`, `isSyncable()`, `pathKey()`, `scanText()`/`isScannable()` secret scanner)
+- @chamba/core ^1.15.1 (shared schemas, `can()`, `isSyncable()`, `pathKey()`, `scanText()`/`isScannable()`/`shouldScanContent()`/`MAX_SCAN_BYTES` secret scanner)
 - better-sqlite3 v11 (synchronous, WAL mode)
 - drizzle-orm (sync transactions)
 - @fastify/rate-limit ^11 (per-route, join endpoint only)
@@ -536,42 +536,112 @@ whether the client (`@chamba/mcp`) also scans locally (CHAMBA-021). It never
 logs or returns the matched value: only `kind` (e.g. `aws-access-key`) and a
 value-free `fingerprint` ever leave `@chamba/core`'s scanner.
 
-**Gate on `PUT /api/blob/:hash`** — reads at most 2 MiB into memory (bodies
-above that, and anything that is not strict UTF-8, are **not scanned** —
-documented limitation; images/PDF are out of scope by the scanner's own
-design). With findings:
+**Gate on `PUT /api/blob/:hash`** (PARCHE-013) — what gets scanned is decided
+entirely by `shouldScanContent()` from `@chamba/core`, the same function the
+chamba client (`@chamba/mcp`) uses. `PUT` has no path, so it always hits the
+strict branch: strict UTF-8, ≤ `MAX_SCAN_BYTES` (2 MiB) read into memory
+(bodies above that, and anything that is not strict UTF-8, are **not
+scanned** — documented limitation; images/PDF are out of scope by this
+design, unless their bytes happen to decode as valid UTF-8 text, in which
+case they **are** scanned — the gate is by content, not by file name or
+extension). With findings:
 
-- `PARCHE_SECRET_GATE=block` — `422 {"error":"secret_detected","kinds":[...]}`.
-  The blob is **not** stored and no `blob_ref` is created (nothing is deleted
-  either way — parche never deletes). A `GET`/`HEAD` of that hash still `404`s.
+- `PARCHE_SECRET_GATE=block` — `422` with
+  `{"error":"secret_detected","kinds":[...],"findings":[{"kind":"...","fingerprint":"..."}]}`.
+  `kinds` has **no cap** (it's bounded by the scanner's rule catalog, not by
+  content size — kept uncapped for compatibility with chamba clients
+  `<1.15.1`, which only read `kinds`). `findings` is capped at 100 entries
+  (`MAX_FINDINGS_IN_RESPONSE`, local to `scan-blob.ts` — mirrors
+  `MAX_FINDINGS_PER_PATH` in `scan-path.ts`), deduplicated by
+  `(kind, fingerprint)`, **non-exempt findings first** so that, when the cap
+  trims the list, what survives is exactly what the client still needs to
+  exempt — exempting makes progress instead of always showing the same 100
+  already-exempt entries. Each entry is `{kind, fingerprint}` only — never
+  `line`, `path`, or the value. The blob is **not** stored and no `blob_ref`
+  is created (nothing is deleted either way — parche never deletes). A
+  `GET`/`HEAD` of that hash still `404`s.
 - `PARCHE_SECRET_GATE=report` (**default**) — the blob is stored normally
   (`201`), and a `warn` log records `{groupId, userId, deviceId, kinds,
-  allowed: false, mode: 'report'}` (never the value). This is the default
-  because **no `@chamba/mcp` client sends the `X-Parche-Secret-Allow` header
-  today** (verified: zero occurrences in `chamba/packages/`) — switching to
-  `block` before that header exists would turn every already-exempted false
-  positive into an unrecoverable `422` for the client. Switch to `block` once
-  a chamba client that implements **CHAMBA-023** (sends the header and
-  handles the per-file `422`) is published.
+  allowed: false, mode: 'report'}` (never the value, never a fingerprint).
+  This stays the default **by deployment order**, not because no client
+  sends the allowlist header — chamba `^1.15.1` does. See "Deployment order
+  to switch to `block`" below.
 - Allowlist (`X-Parche-Secret-Allow: <fingerprint>,<fingerprint>,…`, ≤ 2 KiB,
   ≤ 64 entries, `/^[0-9a-f]{12}$/` each): if **all** findings in the body are
   in that list, the blob is accepted and a `info` log records `allowed: true`.
   The server only knows fingerprints (not paths), so an exemption is scoped
   per-request, not per-path like the client's own allowlist.
 
-**Reporting what's already uploaded** — an idempotent task at startup (and
-the `scan-secrets` admin command) scans the live head of every `.md`,
-`.canvas`, `.base` and `.svg` file, storing findings in `secret_findings`
-(`group_id, path, hash, kind, fingerprint, found_at, resolved_at,
-acknowledged_at, acknowledged_by`). `resolved_at` is set (never a delete) when
-a path's head moves to a blob without that finding, or to a tombstone
-(deleted note). A secret that reappears later reopens the same row
-(`found_at` is preserved). The same push hook also keeps findings in sync in
-real time. `GET /health` exposes `secretScan: idle|running|done`, mirroring
-the existing `metaBackfill` field. Findings are **per live head**, not per
-blob: in `report` mode a blob that was `PUT` but never pushed as a file's
-head (or pushed and later superseded/tombstoned) is stored on disk without
-ever having a `secret_findings` row recorded for it.
+**Deployment order to switch `PARCHE_SECRET_GATE` to `block`:**
+
+1. the whole team is on a chamba client `≥ 1.15.1` (sends
+   `X-Parche-Secret-Allow` and handles the `findings` field);
+2. this server (PARCHE-013) is deployed, so client and server agree on the
+   same scanning rules (`shouldScanContent`/`scanText` from the same
+   `@chamba/core` version);
+3. only then set `PARCHE_SECRET_GATE=block`.
+
+Reversing steps 2 and 3 turns every already-exempted false positive into an
+unrecoverable `422` for clients still on the server's old rules.
+
+**Re-scanning what's already uploaded** — an idempotent task at startup (and
+the `scan-secrets` admin command, both inside `runSecretScan`) scans the live
+head of every `.md`, `.canvas`, `.base` and `.svg` file, storing findings in
+`secret_findings` (`group_id, path, hash, kind, fingerprint, found_at,
+resolved_at, resolved_reason, acknowledged_at, acknowledged_by`).
+`resolved_at` is set (never a delete) when a path's head moves to a blob
+without that finding, or to a tombstone (deleted note); `resolved_reason` is
+`'rules_update'` when the content didn't change but a new/changed scanner
+rule in `@chamba/core` stopped flagging it (`null` in every other case —
+insert, reopen, or a normal content-driven close). A secret that reappears
+later reopens the same row (`found_at` is preserved, `resolved_reason` is
+cleared). The same push hook also keeps findings in sync in real time.
+
+Each path's last-scanned `(hash, rulesVersion)` is tracked in
+`secret_scan_state`. `rulesVersion` is the installed `@chamba/core` version,
+resolved by `src/secrets/rules-version.ts` — a build-time constant injected
+by `tsup.config.ts` (reflects exactly what got bundled into `dist/main.js`),
+with a runtime `node_modules` read as the fallback for `tsx`/Vitest where
+there's no bundle; it never throws (degrades to `"unknown"` and warns via
+`process.stderr`, never `console.*`, never a secret or a path). When a
+path's stored `rulesVersion` differs from the installed one (or is `NULL`),
+that path re-enters the pending set **even if its content hasn't changed**,
+so a new rule (e.g. a Stripe key pattern added in a later `@chamba/core`)
+gets applied to files that were already scanned and clean, not only to
+paths with open findings.
+
+A finding that stops matching is closed as `resolved_reason='rules_update'`
+**only** when the content is unchanged (same hash) **and** the installed
+rules version is a semver-strictly-greater (`src/secrets/semver-compare.ts`)
+than the one recorded for that path — rollback safety: if the server's
+`@chamba/core` was ever downgraded, or the recorded/installed version isn't
+a parseable `major.minor.patch` (including `"unknown"`), the close is
+**normal** (`resolved_reason=null`, requires an ack) instead of silently
+assuming "rules got better".
+
+This runs in the background (never blocks `listen()` or `PUT`), paginated by
+keyset (`(group_id, path)`, 500 rows/page, sequential) rather than loading
+the whole pending set into memory, and is idempotent and resumable: a path
+only leaves the pending set once its scan state is persisted with the
+current hash and rules version, so a crashed/restarted process picks up
+exactly where it left off. A path that can't be scanned within a page (e.g.
+a missing blob) never blocks the rest of that run — the keyset cursor always
+advances past it — it just stays pending for the next run. `GET /health`
+exposes `secretScan: {state, rulesVersion, pending, scanned}` — **this is an
+object, not the bare `idle|running|done` string the field used to be before
+PARCHE-013** — mirroring the existing `metaBackfill` field, never a path or
+a value. Findings are **per live head**, not per blob: in `report` mode a
+blob that was `PUT` but never pushed as a file's head (or pushed and later
+superseded/tombstoned) is stored on disk without ever having a
+`secret_findings` row recorded for it.
+
+A finding closed with `resolved_reason='rules_update'` is **excluded** from
+"Pendiente rotar credencial" (`pendingRotation`, in all three of its
+items/count/total queries) and from `open` — nobody rotated anything, so it
+never asks for an ack. `POST /api/web/g/:slug/secrets/:id/ack` still accepts
+an `id` for such a row if called directly (idempotent no-op): nothing in the
+dashboard can reach it since it's not listed anywhere, so this is harmless by
+construction, not a gap to close.
 
 **Dashboard warning** (owner/admin only, both gate modes) — the web app shows
 "N notas con posibles secretos" (open findings) and "Pendiente rotar
