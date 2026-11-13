@@ -5,7 +5,7 @@ import { authenticate } from '../auth/plugin.js';
 import type { Config } from '../config.js';
 import { blobRefs } from '../db/schema.js';
 import { parseAllowHeader } from '../secrets/allow-header.js';
-import { kindsOf, SCAN_MAX_BYTES, scanBuffer } from '../secrets/scan-blob.js';
+import { findingsPayload, kindsOf, SCAN_MAX_BYTES, scanBuffer } from '../secrets/scan-blob.js';
 import { isValidHash } from '../storage/blob-path.js';
 import {
   BlobTooLargeError,
@@ -125,7 +125,15 @@ export async function blobRoutes(app: FastifyInstance, opts: BlobPluginOptions):
               { groupId, userId, deviceId, kinds, allowed: false },
               'blob rejected: secret_detected',
             );
-            return reply.status(422).send({ error: 'secret_detected', kinds });
+            // PARCHE-013 — `findings` proyecta solo {kind,fingerprint} (nunca
+            // `line`/`path`/el valor), topado a MAX_FINDINGS_IN_RESPONSE y
+            // priorizando las no exentas. `kinds` se mantiene sin tope por
+            // compatibilidad con clientes 1.15.0 (ver scan-blob.ts).
+            return reply.status(422).send({
+              error: 'secret_detected',
+              kinds,
+              findings: findingsPayload(findings, allowed),
+            });
           } else {
             request.log.warn(
               { groupId, userId, deviceId, kinds, allowed: false, mode: 'report' },

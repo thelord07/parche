@@ -382,3 +382,81 @@ describe('POST /api/web/g/:slug/secrets/:id/ack', () => {
     expect(body.open.items.some((i) => i.path === 'leak.md')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// PARCHE-013 (A11) — un hallazgo cerrado por `rules_update` nunca aparece en
+// `pendingRotation`: ni en `items`, ni en `count`, ni en `total` (las tres
+// queries del endpoint deben ser coherentes entre sí).
+// ---------------------------------------------------------------------------
+describe('GET /api/web/g/:slug/secrets — rules_update excluido de pendingRotation (A11)', () => {
+  let ctx: Awaited<ReturnType<typeof setup>>;
+
+  beforeEach(async () => {
+    ctx = await setup();
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+  });
+
+  it('una fila con resolved_reason=rules_update no aparece en items/count/total de pendingRotation', async () => {
+    const before = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/secrets-grp/secrets',
+      cookies: { parche_session: ctx.ownerSession },
+    });
+    const beforeBody = before.json<{
+      pendingRotation: { count: number; total: number; items: Array<{ path: string }> };
+    }>();
+    // El fixture base (ctx.pendingRow) ya tiene exactamente 1 fila pendiente
+    // de rotar (`rotated.md`).
+    expect(beforeBody.pendingRotation.items.map((i) => i.path)).toEqual(['rotated.md']);
+
+    const now = new Date().toISOString();
+    ctx.app.db
+      .insert(files)
+      .values({
+        groupId: ctx.group.groupId,
+        path: 'rules-update.md',
+        pathKey: 'rules-update.md',
+        headHash: 'e'.repeat(64),
+        headSeq: 3,
+      })
+      .run();
+    ctx.app.db
+      .insert(secretFindings)
+      .values({
+        groupId: ctx.group.groupId,
+        path: 'rules-update.md',
+        hash: 'e'.repeat(64),
+        kind: 'stripe-secret-key',
+        fingerprint: 'fedcba987654',
+        foundAt: now,
+        resolvedAt: now,
+        resolvedReason: 'rules_update',
+        acknowledgedAt: null,
+        acknowledgedBy: null,
+      })
+      .run();
+
+    const after = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/web/g/secrets-grp/secrets',
+      cookies: { parche_session: ctx.ownerSession },
+    });
+    const afterBody = after.json<{
+      pendingRotation: { count: number; total: number; items: Array<{ path: string }> };
+    }>();
+
+    // ITEMS: la fila rules_update no aparece.
+    expect(afterBody.pendingRotation.items.some((i) => i.path === 'rules-update.md')).toBe(false);
+    // COUNT (DISTINCT path) y TOTAL (COUNT(*)) no se mueven — las tres
+    // queries de pendingRotation están alineadas (A11).
+    expect(afterBody.pendingRotation.count).toBe(beforeBody.pendingRotation.count);
+    expect(afterBody.pendingRotation.total).toBe(beforeBody.pendingRotation.total);
+
+    // Tampoco aparece en `open` (ya está resuelto).
+    const openBody = after.json<{ open: { items: Array<{ path: string }> } }>();
+    expect(openBody.open.items.some((i) => i.path === 'rules-update.md')).toBe(false);
+  });
+});

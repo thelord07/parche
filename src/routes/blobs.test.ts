@@ -1309,3 +1309,198 @@ describe('PUT /api/blob/:hash — secret gate (PARCHE-012)', () => {
     }, 15000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// PARCHE-013 — T2: paridad de qué se escanea. PUT no tiene ruta, así que el
+// gate es por CONTENIDO, no por nombre (D-Q3 de CHAMBA-023): un body que
+// "sería" binario por extensión, pero cuyos bytes decodifican como UTF-8
+// estricto, sí se escanea. El caso PNG real ya está cubierto en
+// scan-blob.test.ts ("returns null for binary (non-UTF-8) content") — no se
+// duplica aquí.
+// ---------------------------------------------------------------------------
+describe('PUT /api/blob/:hash — paridad por contenido, no por extensión (T2)', () => {
+  let dataDir: string;
+
+  beforeEach(async () => {
+    dataDir = await makeTempDataDir();
+  });
+
+  afterEach(async () => {
+    await cleanupDir(dataDir);
+  });
+
+  it('un body que "sería" un PDF por su extensión pero es UTF-8 válido con un token SÍ se escanea → 422', async () => {
+    const app = await buildServer(makeConfig(dataDir, { secretGate: 'block' }));
+    try {
+      const seeded = await seedGroupWithDevice(app);
+      // Sin ruta en el PUT: lo único que decide es el contenido. Un string
+      // que "parece" un nombre de PDF en el propio texto no cambia nada —
+      // el gate nunca mira un nombre de archivo en este endpoint.
+      const secret = 'AKIAIOSFODNN7EXAMPLE';
+      const body = Buffer.from(`%PDF-not-really\naws: ${secret}\n`, 'utf8');
+      const hash = sha256(body);
+
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/api/blob/${hash}`,
+        payload: body,
+        headers: {
+          'content-type': 'application/pdf',
+          authorization: seeded.authHeader,
+        },
+      });
+
+      expect(res.statusCode).toBe(422);
+      const json = res.json() as { kinds: string[] };
+      expect(json.kinds).toContain('aws-access-key');
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PARCHE-013 — T3: 422 con `findings:[{kind,fingerprint}]` (A7/A8/A9).
+// ---------------------------------------------------------------------------
+describe('PUT /api/blob/:hash — 422 findings (T3)', () => {
+  let dataDir: string;
+
+  beforeEach(async () => {
+    dataDir = await makeTempDataDir();
+  });
+
+  afterEach(async () => {
+    await cleanupDir(dataDir);
+  });
+
+  async function appWithGate(gate: 'report' | 'block') {
+    const logStream = new PassThrough();
+    let logOutput = '';
+    logStream.on('data', (chunk: Buffer) => {
+      logOutput += chunk.toString();
+    });
+    const app = await buildServer(
+      { ...makeConfig(dataDir, { secretGate: gate }), logLevel: 'info' },
+      { logStream },
+    );
+    const seeded = await seedGroupWithDevice(app);
+    return { app, authHeader: seeded.authHeader, getLog: () => logOutput };
+  }
+
+  it('cada finding tiene exactamente {kind, fingerprint} — nunca line/path/el valor', async () => {
+    const { app, authHeader } = await appWithGate('block');
+    try {
+      const secret = 'AKIAIOSFODNN7EXAMPLE';
+      const body = Buffer.from(`aws: ${secret}\n`);
+      const hash = sha256(body);
+
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/api/blob/${hash}`,
+        payload: body,
+        headers: { 'content-type': 'text/plain', authorization: authHeader },
+      });
+
+      expect(res.statusCode).toBe(422);
+      const json = res.json() as {
+        error: string;
+        kinds: string[];
+        findings: Array<{ kind: string; fingerprint: string }>;
+      };
+      expect(json.error).toBe('secret_detected');
+      expect(json.findings.length).toBeGreaterThan(0);
+      for (const f of json.findings) {
+        expect(Object.keys(f).sort()).toEqual(['fingerprint', 'kind']);
+        expect(f.fingerprint).toMatch(/^[0-9a-f]{12}$/);
+      }
+      expect(JSON.stringify(json)).not.toContain(secret);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('A8: ni el body ni los logs contienen el valor ni el fingerprint en el texto del log', async () => {
+    const { app, authHeader, getLog } = await appWithGate('block');
+    try {
+      const secret = 'AKIAIOSFODNN7EXAMPLE';
+      const body = Buffer.from(`aws: ${secret}\n`);
+      const hash = sha256(body);
+
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/api/blob/${hash}`,
+        payload: body,
+        headers: { 'content-type': 'text/plain', authorization: authHeader },
+      });
+
+      const json = res.json() as { findings: Array<{ fingerprint: string }> };
+      const log = getLog();
+      expect(log).not.toContain(secret);
+      for (const f of json.findings) {
+        expect(log).not.toContain(f.fingerprint);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('regresión de cliente viejo (1.15.0): kinds sigue presente y no vacío', async () => {
+    const { app, authHeader } = await appWithGate('block');
+    try {
+      const secret = 'AKIAIOSFODNN7EXAMPLE';
+      const body = Buffer.from(`aws: ${secret}\n`);
+      const hash = sha256(body);
+
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/api/blob/${hash}`,
+        payload: body,
+        headers: { 'content-type': 'text/plain', authorization: authHeader },
+      });
+
+      const json = res.json() as { kinds: string[] };
+      expect(json.kinds.length).toBeGreaterThan(0);
+      expect(json.kinds).toContain('aws-access-key');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('priorización: con allowlist parcial, los fingerprints NO exentos aparecen en findings', async () => {
+    const { app, authHeader } = await appWithGate('block');
+    try {
+      const secretA = 'pch_abcdefgh12345678';
+      const secretB = 'AKIAIOSFODNN7EXAMPLE';
+      const body = Buffer.from(`a: ${secretA}\nb: ${secretB}\n`);
+      const hash = sha256(body);
+
+      const fpA = createHash('sha256')
+        .update(`parche-token\n${secretA}`)
+        .digest('hex')
+        .slice(0, 12);
+      const fpB = createHash('sha256')
+        .update(`aws-access-key\n${secretB}`)
+        .digest('hex')
+        .slice(0, 12);
+
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/api/blob/${hash}`,
+        payload: body,
+        headers: {
+          'content-type': 'text/plain',
+          authorization: authHeader,
+          // solo A está eximido — B debe seguir presente en `findings`.
+          'x-parche-secret-allow': fpA,
+        },
+      });
+
+      expect(res.statusCode).toBe(422);
+      const json = res.json() as { findings: Array<{ kind: string; fingerprint: string }> };
+      const fingerprints = json.findings.map((f) => f.fingerprint);
+      expect(fingerprints).toContain(fpB);
+    } finally {
+      await app.close();
+    }
+  });
+});

@@ -29,6 +29,13 @@
       "when": 1794482392636,
       "tag": "0003_add_secret_findings",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794534276947,
+      "tag": "0004_nasty_ironclad",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# D5 (PARCHE-013) — solo lectura del repo. Sin secrets.*, sin push de
+# imágenes, sin paso de deploy: este workflow únicamente compila, lintea,
+# testea y construye (código + imagen Docker), nada más.
+permissions:
+  contents: read
+
+# Review ronda 1 #9 — un push nuevo a la misma rama/PR cancela la corrida
+# anterior en vez de acumular runners en cola.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Review ronda 1 #9 — sin `version:`: pnpm/action-setup lee
+      # `packageManager` de package.json (pnpm@10.33.0) por sí solo, así
+      # que no hay dos fuentes de verdad para la versión de pnpm.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Docker build (no push)
+        run: docker build .
